@@ -286,9 +286,10 @@ export const login = async (req, res) => {
         unique_id: user.unique_id,
         role: user.role,
         email: user.email,
+        // Optional: Include admin flags in token if needed, usually just role/id is enough
       },
       ACCESS_TOKEN_SECRET,
-      { expiresIn: "15m" }
+      { expiresIn: "7d" }
     );
 
     const refreshToken = jwt.sign(
@@ -314,7 +315,20 @@ export const login = async (req, res) => {
       maxAge: 45 * 24 * 60 * 60 * 1000,
     });
 
-    res.json({ success: true, accessToken });
+    res.json({ 
+      success: true, 
+      accessToken,
+      // ✅ Updated to include Super Admin flag
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        unique_id: user.unique_id,
+        avatar_url: user.avatar_url,
+        is_super_admin: user.is_super_admin // <--- Added for Frontend Logic
+      }
+    });
   } catch (err) {
     console.error("[Login]", err);
     res.status(500).json({ message: "Server error." });
@@ -436,7 +450,7 @@ export const loginVerifyOtp = async (req, res) => {
         email: user.email,
       },
       ACCESS_TOKEN_SECRET,
-      { expiresIn: "15m" }
+      { expiresIn: "7d" }
     );
 
     const refreshToken = jwt.sign(
@@ -465,15 +479,17 @@ export const loginVerifyOtp = async (req, res) => {
     res.json({
       success: true,
       accessToken,
+      // ✅ Updated to include Super Admin flag
       user: {
         id: user.id,
-        name: user.name,            // <--- THIS WAS MISSING
+        name: user.name,
         email: user.email,
         role: user.role,
         unique_id: user.unique_id,
-        special_id: user.special_id, // <--- Needed for SideNav copy button
+        special_id: user.special_id,
         is_verified: user.is_verified,
-        avatar_url: user.avatar_url  // <--- Needed for Profile Pic
+        avatar_url: user.avatar_url,
+        is_super_admin: user.is_super_admin // <--- Added for Frontend Logic
       },
     });
 
@@ -573,8 +589,6 @@ export const resetPassword = async (req, res) => {
   }
 };
 
-// ... existing code ...
-
 // ===================================================
 // REFRESH TOKEN (Fixes the 404 error)
 // ===================================================
@@ -609,7 +623,7 @@ export const refresh = async (req, res) => {
         email: user.email,
       },
       process.env.ACCESS_TOKEN_SECRET,
-      { expiresIn: "15m" }
+      { expiresIn: "7d" }
     );
 
     res.json({ accessToken });

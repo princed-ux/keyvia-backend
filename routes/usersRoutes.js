@@ -3,14 +3,14 @@ import express from "express";
 import { pool } from "../db.js";
 const router = express.Router();
 
-// Search users by name, username, unique_id, or special_id
+// 1. Search Users
 router.get("/search", async (req, res) => {
   const query = req.query.query || "";
   const q = `%${query}%`;
 
   try {
     const { rows } = await pool.query(
-      `SELECT u.id, u.name AS full_name, u.unique_id, u.special_id,
+      `SELECT u.id, u.name AS full_name, u.unique_id, u.special_id, u.email,
               p.username, p.avatar_url
        FROM users u
        LEFT JOIN profiles p ON p.unique_id = u.unique_id
@@ -24,12 +24,12 @@ router.get("/search", async (req, res) => {
     );
     res.json(rows);
   } catch (err) {
-    console.error(err);
+    console.error("Search Error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// Get user by unique_id or special_id
+// 2. Get User Profile
 router.get("/:id", async (req, res) => {
   const { id } = req.params;
   try {
@@ -44,25 +44,41 @@ router.get("/:id", async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: "User not found" });
     res.json(rows[0]);
   } catch (err) {
-    console.error(err);
+    console.error("Get User Error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// routes/usersRoutes.js
+// 3. Last Seen
 router.get("/last-seen/:id", async (req, res) => {
   try {
     const q = await pool.query(
       "SELECT last_active FROM users WHERE unique_id = $1",
       [req.params.id]
     );
-
     return res.json({ last_active: q.rows[0]?.last_active });
   } catch (err) {
-    console.log(err);
+    console.error("Last Seen Error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
+// 4. Block User (NEW)
+router.post("/block", async (req, res) => {
+  const { blocker_id, blocked_id } = req.body;
+  if (!blocker_id || !blocked_id) return res.status(400).json({ error: "Missing IDs" });
+
+  try {
+    // Ensure table exists (Run the SQL provided in earlier step)
+    await pool.query(
+      "INSERT INTO blocked_users (blocker_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+      [blocker_id, blocked_id]
+    );
+    res.json({ success: true, message: "User blocked" });
+  } catch (err) {
+    console.error("Block User Error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 export default router;
