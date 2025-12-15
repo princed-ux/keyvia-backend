@@ -55,7 +55,7 @@ app.use("/api/profile", profileRoutes);
 app.use("/api/avatar", avatarRoutes);
 app.use("/messages", messagesRouter);
 app.use("/users", usersRoutes);
-app.use("/api", paymentsRoutes);
+app.use("/api/payments", paymentsRoutes);
 
 // ---------- Root ----------
 app.get("/", (req, res) => {

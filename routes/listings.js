@@ -1,13 +1,14 @@
-// routes/listingsRoutes.js
 import express from "express";
 import {
   getListings,
   getListingByProductId,
   getAgentListings,
+  getAllListingsAdmin, // 👈 Ensure this is imported!
   createListing,
   updateListing,
   deleteListing,
   updateListingStatus,
+  getPublicAgentProfile,
   activateListing
 } from "../controllers/listingsController.js";
 
@@ -17,17 +18,25 @@ import { upload } from "../middleware/upload.js";
 const router = express.Router();
 
 /* ============================================================
-   PUBLIC ROUTES
+   1. STATIC ROUTES (MUST BE FIRST)
+   These match specific words ("agent", "admin").
+   They MUST be above /:product_id to avoid 404s.
 ============================================================ */
-router.get("/", getListings);
-router.get("/product/:product_id", getListingByProductId);
 
-/* ============================================================
-   AGENT ROUTES
-============================================================ */
+// ✅ Agent Portfolio
 router.get("/agent", verifyToken, getAgentListings);
 
-// Create new listing
+// ✅ Admin Dashboard (Backdoor to see ALL listings)
+router.get("/admin/all", verifyToken, verifyAdmin, getAllListingsAdmin);
+
+/* ============================================================
+   2. GENERAL ROUTES
+============================================================ */
+
+// Public: Get filtered active listings
+router.get("/", getListings);
+
+// Agent: Create new listing
 router.post(
   "/",
   verifyToken,
@@ -39,9 +48,17 @@ router.post(
   createListing
 );
 
-// Update listing
+/* ============================================================
+   3. DYNAMIC ROUTES (/:product_id)
+   These catch everything else. Must be at the bottom.
+============================================================ */
+
+// Public: Get single listing details
+router.get("/:product_id", getListingByProductId);
+
+// Agent: Update listing
 router.put(
-  "/product/:product_id",
+  "/:product_id",
   verifyToken,
   upload.fields([
     { name: "photos", maxCount: 15 },
@@ -51,50 +68,47 @@ router.put(
   updateListing
 );
 
-// Delete listing
-router.delete("/product/:product_id", verifyToken, deleteListing);
+// Agent: Delete listing
+router.delete("/:product_id", verifyToken, deleteListing);
+
+// Agent: Activate (Pay)
+router.put(
+  "/:product_id/activate",
+  verifyToken,
+  activateListing
+);
 
 /* ============================================================
-   ADMIN ROUTES (Approve / Reject)
+   4. ADMIN ACTIONS (Specific IDs)
 ============================================================ */
 
-// Admin updates status (approved / rejected / pending)
 router.put(
-  "/product/:product_id/status",
+  "/:product_id/status",
   verifyToken,
   verifyAdmin,
   updateListingStatus
 );
 
-// Admin approve shortcut — uses updateListingStatus
 router.put(
-  "/product/:product_id/approve",
+  "/:product_id/approve",
   verifyToken,
   verifyAdmin,
   (req, res, next) => {
-    req.body.status = "approved";   // <-- set approved
+    req.body.status = "approved";
     updateListingStatus(req, res, next);
   }
 );
 
-// Admin reject shortcut — also uses updateListingStatus
 router.put(
-  "/product/:product_id/reject",
+  "/:product_id/reject",
   verifyToken,
   verifyAdmin,
   (req, res, next) => {
-    req.body.status = "rejected";   // <-- set rejected
+    req.body.status = "rejected";
     updateListingStatus(req, res, next);
   }
 );
 
-/* ============================================================
-   AGENT — ACTIVATE AFTER PAYMENT
-============================================================ */
-router.put(
-  "/product/:product_id/activate",
-  verifyToken,
-  activateListing
-);
+router.get("/public/agent/:unique_id", getPublicAgentProfile);
 
 export default router;
