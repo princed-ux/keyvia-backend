@@ -3,7 +3,7 @@ import {
   getListings,
   getListingByProductId,
   getAgentListings,
-  getAllListingsAdmin, // 👈 Ensure this is imported!
+  getAllListingsAdmin, 
   createListing,
   updateListing,
   deleteListing,
@@ -12,7 +12,8 @@ import {
   activateListing
 } from "../controllers/listingsController.js";
 
-import { verifyToken, verifyAdmin } from "../middleware/authMiddleware.js";
+// Import authenticateToken from your authMiddleware file
+import { authenticateToken, verifyAdmin } from "../middleware/authMiddleware.js";
 import { upload } from "../middleware/upload.js";
 
 const router = express.Router();
@@ -24,10 +25,10 @@ const router = express.Router();
 ============================================================ */
 
 // ✅ Agent Portfolio
-router.get("/agent", verifyToken, getAgentListings);
+router.get("/agent", authenticateToken, getAgentListings);
 
 // ✅ Admin Dashboard (Backdoor to see ALL listings)
-router.get("/admin/all", verifyToken, verifyAdmin, getAllListingsAdmin);
+router.get("/admin/all", authenticateToken, verifyAdmin, getAllListingsAdmin);
 
 /* ============================================================
    2. GENERAL ROUTES
@@ -39,7 +40,7 @@ router.get("/", getListings);
 // Agent: Create new listing
 router.post(
   "/",
-  verifyToken,
+  authenticateToken,
   upload.fields([
     { name: "photos", maxCount: 15 },
     { name: "video_file", maxCount: 1 },
@@ -59,7 +60,7 @@ router.get("/:product_id", getListingByProductId);
 // Agent: Update listing
 router.put(
   "/:product_id",
-  verifyToken,
+  authenticateToken,
   upload.fields([
     { name: "photos", maxCount: 15 },
     { name: "video_file", maxCount: 1 },
@@ -69,12 +70,12 @@ router.put(
 );
 
 // Agent: Delete listing
-router.delete("/:product_id", verifyToken, deleteListing);
+router.delete("/:product_id", authenticateToken, deleteListing);
 
 // Agent: Activate (Pay)
 router.put(
   "/:product_id/activate",
-  verifyToken,
+  authenticateToken,
   activateListing
 );
 
@@ -84,14 +85,14 @@ router.put(
 
 router.put(
   "/:product_id/status",
-  verifyToken,
+  authenticateToken,
   verifyAdmin,
   updateListingStatus
 );
 
 router.put(
   "/:product_id/approve",
-  verifyToken,
+  authenticateToken,
   verifyAdmin,
   (req, res, next) => {
     req.body.status = "approved";
@@ -101,7 +102,7 @@ router.put(
 
 router.put(
   "/:product_id/reject",
-  verifyToken,
+  authenticateToken,
   verifyAdmin,
   (req, res, next) => {
     req.body.status = "rejected";

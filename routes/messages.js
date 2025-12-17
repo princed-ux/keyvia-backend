@@ -28,7 +28,7 @@ router.post("/conversation", async (req, res) => {
   }
 });
 
-// 2. Get Conversations for User
+// 2. Get Conversations for User (✅ Updated to check Block Status)
 router.get("/user/:id", async (req, res) => {
   const userId = req.params.id;
   try {
@@ -46,6 +46,12 @@ router.get("/user/:id", async (req, res) => {
         lm.created_at AS updated_at,
         lm.sender_id AS last_message_sender,
         
+        -- Check if current user has blocked the other person
+        CASE 
+          WHEN bu.blocker_id IS NOT NULL THEN TRUE 
+          ELSE FALSE 
+        END AS is_blocked,
+
         (SELECT COUNT(*)::int FROM messages m2 
          WHERE m2.conversation_id = c.conversation_id 
          AND m2.sender_id != $1 
@@ -57,6 +63,11 @@ router.get("/user/:id", async (req, res) => {
       LEFT JOIN profiles p1 ON p1.unique_id = u1.unique_id
       LEFT JOIN profiles p2 ON p2.unique_id = u2.unique_id
       
+      -- Join to check block status
+      LEFT JOIN blocked_users bu 
+        ON bu.blocker_id = $1 
+        AND (bu.blocked_id = c.user1_id OR bu.blocked_id = c.user2_id)
+
       LEFT JOIN LATERAL (
         SELECT message, created_at, sender_id
         FROM messages
@@ -76,7 +87,7 @@ router.get("/user/:id", async (req, res) => {
   }
 });
 
-// 3. Get Messages (Sorted Oldest -> Newest)
+// 3. Get Messages
 router.get("/:conversationId", async (req, res) => {
   try {
     const result = await pool.query(
@@ -92,7 +103,7 @@ router.get("/:conversationId", async (req, res) => {
           WHERE mr.message_id = m.message_id) AS reactions
        FROM messages m
        WHERE m.conversation_id = $1
-       ORDER BY m.created_at ASC`, // ✅ Ensures correct order
+       ORDER BY m.created_at ASC`,
       [req.params.conversationId]
     );
     res.json(result.rows);
@@ -102,10 +113,21 @@ router.get("/:conversationId", async (req, res) => {
   }
 });
 
-// 4. Send Message (HTTP Fallback)
+// 4. Send Message
 router.post("/:conversationId/send", async (req, res) => {
   const { sender_id, message } = req.body;
   try {
+    // Optional: Check if blocked before sending
+    const checkBlock = await pool.query(
+      `SELECT 1 FROM blocked_users WHERE (blocker_id=$1 AND blocked_id IN (SELECT user1_id FROM conversations WHERE conversation_id=$2 UNION SELECT user2_id FROM conversations WHERE conversation_id=$2)) 
+       OR (blocked_id=$1 AND blocker_id IN (SELECT user1_id FROM conversations WHERE conversation_id=$2 UNION SELECT user2_id FROM conversations WHERE conversation_id=$2))`,
+      [sender_id, req.params.conversationId]
+    );
+
+    if (checkBlock.rows.length > 0) {
+      return res.status(403).json({ error: "Cannot send message. User blocked." });
+    }
+
     const result = await pool.query(
       `INSERT INTO messages (conversation_id, sender_id, message) VALUES ($1, $2, $3) RETURNING *`,
       [req.params.conversationId, sender_id, message]

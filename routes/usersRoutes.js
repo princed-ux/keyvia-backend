@@ -1,4 +1,3 @@
-// routes/users.js
 import express from "express";
 import { pool } from "../db.js";
 const router = express.Router();
@@ -63,13 +62,12 @@ router.get("/last-seen/:id", async (req, res) => {
   }
 });
 
-// 4. Block User (NEW)
+// 4. Block User
 router.post("/block", async (req, res) => {
   const { blocker_id, blocked_id } = req.body;
   if (!blocker_id || !blocked_id) return res.status(400).json({ error: "Missing IDs" });
 
   try {
-    // Ensure table exists (Run the SQL provided in earlier step)
     await pool.query(
       "INSERT INTO blocked_users (blocker_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
       [blocker_id, blocked_id]
@@ -77,6 +75,23 @@ router.post("/block", async (req, res) => {
     res.json({ success: true, message: "User blocked" });
   } catch (err) {
     console.error("Block User Error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// 5. Unblock User (✅ ADDED THIS ROUTE)
+router.post("/unblock", async (req, res) => {
+  const { blocker_id, blocked_id } = req.body;
+  if (!blocker_id || !blocked_id) return res.status(400).json({ error: "Missing IDs" });
+
+  try {
+    await pool.query(
+      "DELETE FROM blocked_users WHERE blocker_id = $1 AND blocked_id = $2",
+      [blocker_id, blocked_id]
+    );
+    res.json({ success: true, message: "User unblocked" });
+  } catch (err) {
+    console.error("Unblock User Error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
