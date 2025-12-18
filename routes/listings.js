@@ -12,29 +12,74 @@ import {
   activateListing
 } from "../controllers/listingsController.js";
 
-// Import authenticateToken from your authMiddleware file
 import { authenticateToken, verifyAdmin } from "../middleware/authMiddleware.js";
 import { upload } from "../middleware/upload.js";
+
+// ✅ CORRECT IMPORT (Named export from parent directory)
+import { pool } from "../db.js"; 
 
 const router = express.Router();
 
 /* ============================================================
    1. STATIC ROUTES (MUST BE FIRST)
-   These match specific words ("agent", "admin").
-   They MUST be above /:product_id to avoid 404s.
 ============================================================ */
 
-// ✅ Agent Portfolio
+// ✅ 1. Public Listings (For Buy/Rent Pages)
+// ✅ 1. Public Listings (For Buy/Rent Pages)
+router.get("/public", async (req, res) => {
+  try {
+    const { category } = req.query; // e.g., 'Sale' or 'Rent'
+    
+    // 1. Base Query: Approved & Active
+    let queryText = `
+      SELECT * FROM listings 
+      WHERE status = 'approved' 
+      AND is_active = true
+    `;
+    const queryParams = [];
+
+    // 2. Filter Logic: Check BOTH 'category' OR 'listing_type'
+    // Uses ILIKE for case-insensitive matching (Sale == sale)
+    if (category) {
+      queryText += ` AND (category ILIKE $1 OR listing_type ILIKE $1)`;
+      queryParams.push(category);
+    }
+
+    queryText += " ORDER BY activated_at DESC NULLS LAST";
+
+    const result = await pool.query(queryText, queryParams);
+    
+    // 3. Process Results
+    const listings = result.rows.map(l => ({
+      ...l,
+      photos: typeof l.photos === 'string' ? JSON.parse(l.photos) : l.photos,
+      features: typeof l.features === 'string' ? JSON.parse(l.features) : l.features,
+      latitude: l.latitude ? parseFloat(l.latitude) : null,
+      longitude: l.longitude ? parseFloat(l.longitude) : null
+    }));
+
+    res.json(listings);
+  } catch (err) {
+    console.error("Error fetching public listings:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ✅ 2. Agent Portfolio
 router.get("/agent", authenticateToken, getAgentListings);
 
-// ✅ Admin Dashboard (Backdoor to see ALL listings)
+// ✅ 3. Admin Dashboard
 router.get("/admin/all", authenticateToken, verifyAdmin, getAllListingsAdmin);
+
+// ✅ 4. Public Agent Profile (Specific Static Route)
+router.get("/public/agent/:unique_id", getPublicAgentProfile);
+
 
 /* ============================================================
    2. GENERAL ROUTES
 ============================================================ */
 
-// Public: Get filtered active listings
+// Public: Get all listings (General filter)
 router.get("/", getListings);
 
 // Agent: Create new listing
@@ -51,7 +96,7 @@ router.post(
 
 /* ============================================================
    3. DYNAMIC ROUTES (/:product_id)
-   These catch everything else. Must be at the bottom.
+   ⚠️ THESE MUST BE AT THE BOTTOM because they catch everything else.
 ============================================================ */
 
 // Public: Get single listing details
@@ -109,7 +154,5 @@ router.put(
     updateListingStatus(req, res, next);
   }
 );
-
-router.get("/public/agent/:unique_id", getPublicAgentProfile);
 
 export default router;
