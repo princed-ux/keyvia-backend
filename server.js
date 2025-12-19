@@ -19,6 +19,7 @@ import profileRoutes from "./routes/profile.js";
 import avatarRoutes from "./routes/profileAvatar.js";
 import usersRoutes from "./routes/usersRoutes.js";
 import paymentsRoutes from "./routes/paymentsRoutes.js";
+import walletRoutes from "./routes/wallet.js";
 import agentRoutes from "./routes/agents.js";
 
 dotenv.config();
@@ -77,6 +78,7 @@ app.use("/api/profile", profileRoutes);
 app.use("/api/avatar", avatarRoutes);
 app.use("/users", usersRoutes);
 app.use("/api/payments", paymentsRoutes);
+app.use("/api/wallet", walletRoutes);
 app.use("/agents", agentRoutes);
 
 // Root Route
