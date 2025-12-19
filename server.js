@@ -21,6 +21,7 @@ import usersRoutes from "./routes/usersRoutes.js";
 import paymentsRoutes from "./routes/paymentsRoutes.js";
 import walletRoutes from "./routes/wallet.js";
 import agentRoutes from "./routes/agents.js";
+import ownerRoutes from "./routes/ownerRoutes.js";
 
 dotenv.config();
 
@@ -80,6 +81,7 @@ app.use("/users", usersRoutes);
 app.use("/api/payments", paymentsRoutes);
 app.use("/api/wallet", walletRoutes);
 app.use("/agents", agentRoutes);
+app.use("/owners", ownerRoutes);
 
 // Root Route
 app.get("/", (req, res) => {

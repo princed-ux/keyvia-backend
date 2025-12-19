@@ -1,49 +1,43 @@
 import express from "express";
 import { pool } from "../db.js";
-// ✅ Correct Import Path based on your file structure
 import { authenticateToken } from "../middleware/authMiddleware.js"; 
 
 const router = express.Router();
 
-// Middleware: All agent routes require login
+// Middleware: All routes require login
 router.use(authenticateToken); 
 
 // ==========================================
 // 1. DASHBOARD STATS (Top Cards)
 // ==========================================
 router.get("/stats", async (req, res) => {
-  // Use the unique_id from the token (matches 'agent_unique_id' in your table)
   const agentId = req.user.unique_id; 
 
   try {
-    const [listRes, earningsRes] = await Promise.all([
-      // ✅ Query from 'listings' table using YOUR column names
+    const [listRes, activeRes, viewRes, spentRes] = await Promise.all([
+      // 1. Total Listings
+      pool.query(`SELECT COUNT(*)::int as count FROM listings WHERE agent_unique_id = $1`, [agentId]),
+      
+      // 2. Active Listings
+      pool.query(`SELECT COUNT(*)::int as count FROM listings WHERE agent_unique_id = $1 AND status = 'active'`, [agentId]),
+      
+      // 3. Total Views
+      pool.query(`SELECT COALESCE(SUM(views), 0)::int as total FROM listings WHERE agent_unique_id = $1`, [agentId]),
+      
+      // 4. Total Invested (Wallet Funding + Direct Payments)
       pool.query(
-        `SELECT 
-           COUNT(*)::int as total_listings,
-           SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END)::int as active_listings,
-           COALESCE(SUM(views), 0)::int as total_views
-         FROM listings 
-         WHERE agent_unique_id = $1`, // <--- Uses agent_unique_id
-        [agentId]
-      ),
-      // ✅ Query from 'agent_transactions' table
-      pool.query(
-        `SELECT COALESCE(SUM(amount), 0) as total_earnings
-         FROM agent_transactions 
-         WHERE agent_id = $1 AND type = 'Commission'`,
+        `SELECT COALESCE(SUM(amount), 0)::float as total 
+         FROM payments 
+         WHERE agent_unique_id = $1 AND status = 'successful'`,
         [agentId]
       )
     ]);
 
-    const stats = listRes.rows[0];
-    const earnings = earningsRes.rows[0].total_earnings;
-
     res.json({
-      listings: stats.total_listings || 0,
-      active: stats.active_listings || 0,
-      views: stats.total_views || 0,
-      earnings: Number(earnings) || 0
+      listings: listRes.rows[0].count || 0,
+      active: activeRes.rows[0].count || 0,
+      views: viewRes.rows[0].total || 0,
+      total_spent: spentRes.rows[0].total || 0
     });
   } catch (err) {
     console.error("Stats Error:", err.message);
@@ -52,46 +46,50 @@ router.get("/stats", async (req, res) => {
 });
 
 // ==========================================
-// 2. REVENUE CHART (Area Chart)
+// 2. DAILY FUNDING CHART (Bar Chart)
 // ==========================================
-router.get("/charts/revenue", async (req, res) => {
+router.get("/charts/funding", async (req, res) => {
   const agentId = req.user.unique_id;
 
   try {
+    // Fetch daily sums for the current week (Monday to Sunday)
     const result = await pool.query(
       `SELECT 
-         TO_CHAR(created_at, 'Mon') as month,
+         EXTRACT(ISODOW FROM created_at)::int as day_num, -- 1=Mon, 7=Sun
          SUM(amount) as total
-       FROM agent_transactions
-       WHERE agent_id = $1 
-         AND type = 'Commission'
-         AND created_at > NOW() - INTERVAL '6 months'
-       GROUP BY TO_CHAR(created_at, 'Mon'), DATE_TRUNC('month', created_at)
-       ORDER BY DATE_TRUNC('month', created_at)`,
+       FROM payments
+       WHERE agent_unique_id = $1 
+         AND status = 'successful'
+         AND purpose = 'wallet_funding' -- Only count funding, not spending
+         AND created_at >= DATE_TRUNC('week', CURRENT_DATE) -- Start of this week
+       GROUP BY day_num
+       ORDER BY day_num ASC`,
       [agentId]
     );
 
-    const categories = result.rows.map(r => r.month);
-    const data = result.rows.map(r => Number(r.total));
-
-    res.json({
-      categories: categories.length ? categories : ["Jan", "Feb", "Mar", "Apr", "May"],
-      series: [{ name: "Revenue", data: data.length ? data : [0, 0, 0, 0, 0] }]
+    // Map DB result (sparse) to full Mon-Sun array [0, 0, 0, 0, 0, 0, 0]
+    const weeklyData = Array(7).fill(0);
+    result.rows.forEach(row => {
+      // day_num is 1-7, array index is 0-6
+      if (row.day_num >= 1 && row.day_num <= 7) {
+        weeklyData[row.day_num - 1] = Number(row.total);
+      }
     });
+
+    res.json({ data: weeklyData });
   } catch (err) {
-    console.error("Chart Error:", err.message);
+    console.error("Funding Chart Error:", err.message);
     res.status(500).json({ error: "Server error" });
   }
 });
 
 // ==========================================
-// 3. CATEGORY CHART (Donut Chart)
+// 3. LISTING TYPES CHART (Donut)
 // ==========================================
-router.get("/charts/categories", async (req, res) => {
+router.get("/charts/types", async (req, res) => {
   const agentId = req.user.unique_id;
 
   try {
-    // ✅ Group by 'property_type' instead of 'type'
     const result = await pool.query(
       `SELECT property_type, COUNT(*)::int as count 
        FROM listings 
@@ -105,33 +103,53 @@ router.get("/charts/categories", async (req, res) => {
 
     res.json({
       labels: labels.length ? labels : ["None"],
-      series: series.length ? series : [1]
+      series: series.length ? series : [1] // Placeholder if empty
     });
   } catch (err) {
-    console.error("Category Error:", err.message);
+    console.error("Type Chart Error:", err.message);
     res.status(500).json({ error: "Server error" });
   }
 });
 
 // ==========================================
-// 4. RECENT LISTINGS
+// 4. LISTING STATUS CHART (Donut)
+// ==========================================
+router.get("/charts/status", async (req, res) => {
+  const agentId = req.user.unique_id;
+
+  try {
+    const result = await pool.query(
+      `SELECT status, COUNT(*)::int as count 
+       FROM listings 
+       WHERE agent_unique_id = $1 
+       GROUP BY status`, 
+      [agentId]
+    );
+
+    const labels = result.rows.map(r => r.status || "Unknown");
+    const series = result.rows.map(r => r.count);
+
+    res.json({
+      labels: labels.length ? labels : ["None"],
+      series: series.length ? series : [1]
+    });
+  } catch (err) {
+    console.error("Status Chart Error:", err.message);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ==========================================
+// 5. RECENT LISTINGS
 // ==========================================
 router.get("/listings", async (req, res) => {
   const agentId = req.user.unique_id;
   const limit = req.query.limit || 5;
 
   try {
-    // ✅ Select specific columns from your schema
-    // Concatenate City + State for "location"
     const result = await pool.query(
       `SELECT 
-         id, 
-         title, 
-         CONCAT(city, ', ', state) as location, 
-         price, 
-         status, 
-         views, 
-         photos 
+         id, product_id, title, city, price, status, views, photos 
        FROM listings 
        WHERE agent_unique_id = $1 
        ORDER BY created_at DESC 
@@ -140,20 +158,20 @@ router.get("/listings", async (req, res) => {
     );
 
     const data = result.rows.map(row => {
-      // ✅ Handle JSONB photos array safely
+      // Handle photos array safely
       let imageUrl = null;
       if (row.photos && Array.isArray(row.photos) && row.photos.length > 0) {
-        imageUrl = row.photos[0].url; // Assuming object structure {url: '...'}
+        imageUrl = row.photos[0].url || row.photos[0]; 
       }
 
       return {
-        id: row.id,
+        id: row.product_id || row.id, // Use product_id if available for robust keys
         title: row.title,
-        location: row.location || "Unknown Location",
+        location: row.city || "Unknown",
         price: Number(row.price),
         status: row.status,
         views: row.views || 0,
-        image: imageUrl || "https://via.placeholder.com/150" // Fallback image
+        image: imageUrl || "https://via.placeholder.com/150"
       };
     });
 
@@ -165,23 +183,38 @@ router.get("/listings", async (req, res) => {
 });
 
 // ==========================================
-// 5. RECENT TRANSACTIONS
+// 6. RECENT TRANSACTIONS (Wallet)
 // ==========================================
 router.get("/transactions", async (req, res) => {
   const agentId = req.user.unique_id;
   const limit = req.query.limit || 5;
 
   try {
+    // Fetch from 'payments' table
     const result = await pool.query(
-      `SELECT transaction_id as id, amount, type, status, created_at as date 
-       FROM agent_transactions 
-       WHERE agent_id = $1 
+      `SELECT 
+         transaction_id as id, 
+         amount, 
+         purpose as type, 
+         status, 
+         created_at as date 
+       FROM payments 
+       WHERE agent_unique_id = $1 
        ORDER BY created_at DESC 
        LIMIT $2`,
       [agentId, limit]
     );
 
-    res.json(result.rows);
+    const data = result.rows.map(row => ({
+      id: row.id,
+      amount: Number(row.amount),
+      // Format readable type
+      type: row.type === 'wallet_funding' ? 'Wallet Funding' : 'Listing Activation',
+      status: row.status,
+      date: row.date
+    }));
+
+    res.json(data);
   } catch (err) {
     console.error("Txn Error:", err.message);
     res.status(500).json({ error: "Server error" });
