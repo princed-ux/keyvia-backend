@@ -1,4 +1,5 @@
 import express from "express";
+import jwt from "jsonwebtoken"; 
 import {
   getListings,
   getListingByProductId,
@@ -9,13 +10,13 @@ import {
   deleteListing,
   updateListingStatus,
   getPublicAgentProfile,
-  activateListing
+  activateListing,
+  analyzeListing,        // ✅ Single Analysis
+  batchAnalyzeListings   // ✅ Batch Analysis
 } from "../controllers/listingsController.js";
 
 import { authenticateToken, verifyAdmin } from "../middleware/authMiddleware.js";
 import { upload } from "../middleware/upload.js";
-
-// ✅ CORRECT IMPORT (Named export from parent directory)
 import { pool } from "../db.js"; 
 
 const router = express.Router();
@@ -24,43 +25,98 @@ const router = express.Router();
    1. STATIC ROUTES (MUST BE FIRST)
 ============================================================ */
 
-// ✅ 1. Public Listings (For Buy/Rent Pages)
-// ✅ 1. Public Listings (For Buy/Rent Pages)
+// ✅ 1. Public Listings (UPDATED: Checks Favorites & Filters & Zip Code)
 router.get("/public", async (req, res) => {
   try {
-    const { category } = req.query; // e.g., 'Sale' or 'Rent'
-    
-    // 1. Base Query: Approved & Active
-    let queryText = `
-      SELECT * FROM listings 
-      WHERE status = 'approved' 
-      AND is_active = true
-    `;
-    const queryParams = [];
+    const { category, search, minLat, maxLat, minLng, maxLng } = req.query;
 
-    // 2. Filter Logic: Check BOTH 'category' OR 'listing_type'
-    // Uses ILIKE for case-insensitive matching (Sale == sale)
-    if (category) {
-      queryText += ` AND (category ILIKE $1 OR listing_type ILIKE $1)`;
-      queryParams.push(category);
+    // --- A. SOFT AUTHENTICATION ---
+    let currentUserId = null;
+    const authHeader = req.headers['authorization'];
+    if (authHeader) {
+        const token = authHeader.split(' ')[1];
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            currentUserId = decoded.unique_id;
+        } catch (e) {
+            console.log("Guest user or expired token accessing public listings.");
+        }
     }
 
-    queryText += " ORDER BY activated_at DESC NULLS LAST";
+    console.log(`🔍 Fetching Public Listings. User: ${currentUserId || 'Guest'}, Filters:`, { category, search });
 
-    const result = await pool.query(queryText, queryParams);
+    // --- B. BUILD QUERY ---
+    let queryText = `
+      SELECT l.*, 
+             p.full_name as agent_name, 
+             p.avatar_url as agent_avatar, 
+             p.agency_name,
+             p.username as agent_username,
+             CASE WHEN f.product_id IS NOT NULL THEN true ELSE false END as is_favorited
+      FROM listings l
+      JOIN profiles p ON l.agent_unique_id = p.unique_id
+      LEFT JOIN favorites f ON l.product_id = f.product_id AND f.user_id = $1
+      WHERE l.status = 'approved' 
+      AND l.is_active = true
+    `;
     
-    // 3. Process Results
-    const listings = result.rows.map(l => ({
-      ...l,
-      photos: typeof l.photos === 'string' ? JSON.parse(l.photos) : l.photos,
-      features: typeof l.features === 'string' ? JSON.parse(l.features) : l.features,
-      latitude: l.latitude ? parseFloat(l.latitude) : null,
-      longitude: l.longitude ? parseFloat(l.longitude) : null
-    }));
+    const queryParams = [currentUserId];
+    let paramCounter = 2; 
+
+    // --- C. APPLY FILTERS ---
+
+    if (category && category !== 'undefined') {
+      queryText += ` AND (category ILIKE $${paramCounter} OR listing_type ILIKE $${paramCounter})`;
+      queryParams.push(category);
+      paramCounter++;
+    }
+
+    if (search) {
+      queryText += ` AND (
+        city ILIKE $${paramCounter} OR 
+        address ILIKE $${paramCounter} OR 
+        state ILIKE $${paramCounter} OR
+        country ILIKE $${paramCounter} OR
+        zip_code ILIKE $${paramCounter} 
+      )`;
+      queryParams.push(`%${search}%`);
+      paramCounter++;
+    }
+
+    if (minLat && maxLat && minLng && maxLng && !isNaN(Number(minLat))) {
+      queryText += ` 
+        AND latitude::numeric >= $${paramCounter} 
+        AND latitude::numeric <= $${paramCounter + 1}
+        AND longitude::numeric >= $${paramCounter + 2} 
+        AND longitude::numeric <= $${paramCounter + 3}
+      `;
+      queryParams.push(minLat, maxLat, minLng, maxLng);
+      paramCounter += 4;
+    }
+
+    queryText += " ORDER BY activated_at DESC NULLS LAST LIMIT 500";
+
+    // --- D. EXECUTE ---
+    const result = await pool.query(queryText, queryParams);
+    console.log(`✅ Found ${result.rows.length} listings.`);
+
+    const listings = result.rows.map(l => {
+      let photos = [], features = [];
+      try { photos = typeof l.photos === 'string' ? JSON.parse(l.photos) : (l.photos || []); } catch (e) {}
+      try { features = typeof l.features === 'string' ? JSON.parse(l.features) : (l.features || []); } catch (e) {}
+
+      return {
+        ...l,
+        photos,
+        features,
+        latitude: l.latitude ? parseFloat(l.latitude) : null,
+        longitude: l.longitude ? parseFloat(l.longitude) : null
+      };
+    });
 
     res.json(listings);
   } catch (err) {
-    console.error("Error fetching public listings:", err);
+    console.error("❌ Error fetching public listings:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -71,7 +127,7 @@ router.get("/agent", authenticateToken, getAgentListings);
 // ✅ 3. Admin Dashboard
 router.get("/admin/all", authenticateToken, verifyAdmin, getAllListingsAdmin);
 
-// ✅ 4. Public Agent Profile (Specific Static Route)
+// ✅ 4. Public Agent Profile
 router.get("/public/agent/:unique_id", getPublicAgentProfile);
 
 
@@ -79,10 +135,8 @@ router.get("/public/agent/:unique_id", getPublicAgentProfile);
    2. GENERAL ROUTES
 ============================================================ */
 
-// Public: Get all listings (General filter)
 router.get("/", getListings);
 
-// Agent: Create new listing
 router.post(
   "/",
   authenticateToken,
@@ -95,14 +149,11 @@ router.post(
 );
 
 /* ============================================================
-   3. DYNAMIC ROUTES (/:product_id)
-   ⚠️ THESE MUST BE AT THE BOTTOM because they catch everything else.
+   3. DYNAMIC ROUTES
 ============================================================ */
 
-// Public: Get single listing details
 router.get("/:product_id", getListingByProductId);
 
-// Agent: Update listing
 router.put(
   "/:product_id",
   authenticateToken,
@@ -114,10 +165,12 @@ router.put(
   updateListing
 );
 
-// Agent: Delete listing
 router.delete("/:product_id", authenticateToken, deleteListing);
 
-// Agent: Activate (Pay)
+// ✅ AI ANALYSIS ROUTES
+router.post("/:product_id/analyze", authenticateToken, verifyAdmin, analyzeListing);
+router.post("/admin/analyze-all", authenticateToken, verifyAdmin, batchAnalyzeListings);
+
 router.put(
   "/:product_id/activate",
   authenticateToken,
@@ -125,34 +178,19 @@ router.put(
 );
 
 /* ============================================================
-   4. ADMIN ACTIONS (Specific IDs)
+   4. ADMIN ACTIONS
 ============================================================ */
 
-router.put(
-  "/:product_id/status",
-  authenticateToken,
-  verifyAdmin,
-  updateListingStatus
-);
+router.put("/:product_id/status", authenticateToken, verifyAdmin, updateListingStatus);
 
-router.put(
-  "/:product_id/approve",
-  authenticateToken,
-  verifyAdmin,
-  (req, res, next) => {
+router.put("/:product_id/approve", authenticateToken, verifyAdmin, (req, res, next) => {
     req.body.status = "approved";
     updateListingStatus(req, res, next);
-  }
-);
+});
 
-router.put(
-  "/:product_id/reject",
-  authenticateToken,
-  verifyAdmin,
-  (req, res, next) => {
+router.put("/:product_id/reject", authenticateToken, verifyAdmin, (req, res, next) => {
     req.body.status = "rejected";
     updateListingStatus(req, res, next);
-  }
-);
+});
 
 export default router;

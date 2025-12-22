@@ -22,11 +22,12 @@ import paymentsRoutes from "./routes/paymentsRoutes.js";
 import walletRoutes from "./routes/wallet.js";
 import agentRoutes from "./routes/agents.js";
 import ownerRoutes from "./routes/ownerRoutes.js";
+import favoriteRoutes from "./routes/favorites.js"
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5000; 
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 
 // =======================================================================
@@ -82,7 +83,8 @@ app.use("/api/payments", paymentsRoutes);
 app.use("/api/wallet", walletRoutes);
 app.use("/agents", agentRoutes);
 app.use("/owners", ownerRoutes);
-
+app.use("/api/favorites", favoriteRoutes)
+ 
 // Root Route
 app.get("/", (req, res) => {
   res.send("✅ Keyvia backend running with Socket.io 🚀");

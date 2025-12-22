@@ -8,15 +8,25 @@ export const uploadAvatar = async (req, res) => {
 
     const userId = req.user.unique_id;
 
-    // 1. Upload to Cloudinary
-    const result = await cloudinary.uploader.upload(req.file.path, {
-      folder: "avatars",
-      public_id: `avatar_${userId}`,
-      overwrite: true,
-      transformation: [{ width: 300, height: 300, crop: "fill", gravity: "face" }],
+    // 1. Upload to Cloudinary via Stream (Buffer)
+    const result = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            {
+                folder: "avatars",
+                public_id: `avatar_${userId}`,
+                overwrite: true,
+                transformation: [{ width: 300, height: 300, crop: "fill", gravity: "face" }],
+                resource_type: "image"
+            },
+            (error, result) => {
+                if (error) return reject(error);
+                resolve(result);
+            }
+        );
+        stream.end(req.file.buffer); // 👈 Critical: Send the buffer!
     });
 
-    const avatarUrl = result.secure_url; 
+    const avatarUrl = result.secure_url;
 
     // 2. ✅ Update PROFILES Table
     await pool.query(
@@ -24,8 +34,7 @@ export const uploadAvatar = async (req, res) => {
       [avatarUrl, userId]
     );
 
-    // 3. ✅ Update USERS Table (CRITICAL for Sidebar/Navbar)
-    // This ensures the image updates in the sidebar instantly
+    // 3. ✅ Update USERS Table
     await pool.query(
       "UPDATE users SET avatar_url = $1 WHERE unique_id = $2",
       [avatarUrl, userId]

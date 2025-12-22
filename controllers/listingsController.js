@@ -1,8 +1,8 @@
-// controllers/listingsController.js
 import { pool } from "../db.js";
 import cloudinary from "../utils/cloudinary.js";
 import crypto from "crypto";
 import axios from "axios";
+import { performFullAnalysis } from "../services/analysisService.js";
 
 /* ----------------- helpers ----------------- */
 function generateProductId() {
@@ -11,6 +11,50 @@ function generateProductId() {
 
 function genAssetId(prefix = "asset") {
   return `${prefix}_${crypto.randomUUID().split("-")[0]}`;
+}
+
+// ✅ SMART GEOCODING HELPER (With Fallback)
+async function getCoordinates(address, city, state, country, zip) {
+  const userAgent = "KeyviaApp/1.0"; // Required by Nominatim
+
+  // 1. Try Full Address
+  let query = [address, city, state, zip, country].filter(Boolean).join(", ");
+  console.log(`🌍 Geocoding Attempt 1 (Full): ${query}`);
+
+  try {
+    let url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
+    let res = await axios.get(url, { headers: { "User-Agent": userAgent } });
+
+    if (res.data && res.data.length > 0) {
+      return { lat: parseFloat(res.data[0].lat), lng: parseFloat(res.data[0].lon) };
+    }
+
+    // 2. Fallback: Try City + State + Country
+    console.log("⚠️ Precise location not found. Trying City level...");
+    query = [city, state, country].filter(Boolean).join(", ");
+    url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
+    res = await axios.get(url, { headers: { "User-Agent": userAgent } });
+
+    if (res.data && res.data.length > 0) {
+      return { lat: parseFloat(res.data[0].lat), lng: parseFloat(res.data[0].lon) };
+    }
+
+    // 3. Fallback: Try State + Country
+    console.log("⚠️ City not found. Trying State level...");
+    query = [state, country].filter(Boolean).join(", ");
+    url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
+    res = await axios.get(url, { headers: { "User-Agent": userAgent } });
+
+    if (res.data && res.data.length > 0) {
+      return { lat: parseFloat(res.data[0].lat), lng: parseFloat(res.data[0].lon) };
+    }
+
+  } catch (error) {
+    console.error("❌ Geocoding Error:", error.message);
+  }
+  
+  console.log("❌ Location could not be found on map.");
+  return null;
 }
 
 const uploadImageFileToCloudinary = async (file) => {
@@ -200,8 +244,9 @@ export const createListing = async (req, res) => {
       city,
       state,
       country,
-      latitude,  // 👈 New: Coordinates
-      longitude, // 👈 New: Coordinates
+      zip_code, // 👈 New: Zip Code
+      latitude, 
+      longitude, 
       bedrooms,
       bathrooms,
       parking,
@@ -229,6 +274,7 @@ export const createListing = async (req, res) => {
     year_built = year_built || req.body.yearBuilt;
     square_footage = square_footage || req.body.squareFootage;
     lot_size = lot_size || req.body.lotSize;
+    zip_code = zip_code || req.body.zipCode; // 👈 Fallback for zipCode
 
     if (!product_id) product_id = generateProductId();
 
@@ -305,11 +351,21 @@ export const createListing = async (req, res) => {
     const normalizedSquareFootage = square_footage ? Number(square_footage) : null;
     const normalizedLotSize = lot_size ? Number(lot_size) : null;
     
-    // 🔹 Convert Coordinates
-    const lat = latitude ? Number(latitude) : null;
-    const lng = longitude ? Number(longitude) : null;
+    // 🔹 Convert Coordinates & Auto-Geocode if Missing
+    let lat = latitude ? Number(latitude) : null;
+    let lng = longitude ? Number(longitude) : null;
+
+    if ((!lat || !lng) && (address || city)) {
+        const coords = await getCoordinates(address, city, state, country, zip_code);
+        if (coords) {
+            lat = coords.lat;
+            lng = coords.lng;
+            console.log("📍 Auto-detected Coordinates:", lat, lng);
+        }
+    }
 
     // 🔹 Insert into DB
+    // 🛑 Note: We added zip_code as Param $36
     const query = `
       INSERT INTO listings (
         product_id, agent_unique_id, created_by, email,
@@ -321,13 +377,14 @@ export const createListing = async (req, res) => {
         features, photos, video_url, video_public_id,
         virtual_tour_url, virtual_tour_public_id,
         contact_name, contact_email, contact_phone, contact_method,
+        zip_code,
         status, is_active, created_at, updated_at
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-        $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
-        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,
-        $34,$35,
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
+        $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
+        $32, $33, $34, $35, $36,
         'pending', false, NOW(), NOW()
       )
       RETURNING *;
@@ -355,7 +412,7 @@ export const createListing = async (req, res) => {
       normalizedBedrooms,
       normalizedBathrooms,
       parking || null,
-      normalizedYearBuilt,
+      normalizedYearBuilt, // 👈 Param 22 (Skipped in previous, fixed here)
       normalizedSquareFootage,
       furnishing || null,
       normalizedLotSize,
@@ -369,6 +426,7 @@ export const createListing = async (req, res) => {
       contact_email || null,
       contact_phone || null,
       contact_method || null,
+      zip_code || null // 👈 Param 36
     ];
 
     const result = await pool.query(query, params);
@@ -418,9 +476,8 @@ export const createListing = async (req, res) => {
 };
 
 
-
 /* -------------------------------------------------------
-   UPDATE LISTING (CLOUDINARY SAFE VERSION)
+   UPDATE LISTING (UPDATED with Geocoding & Zip Code)
 ------------------------------------------------------- */
 export const updateListing = async (req, res) => {
   try {
@@ -442,7 +499,7 @@ export const updateListing = async (req, res) => {
       return res.status(400).json({ message: "Profile missing" });
     const agentEmail = emailRes.rows[0].email;
 
-    // Fetch listing
+    // Fetch existing listing
     const found = await pool.query(
       "SELECT * FROM listings WHERE product_id=$1",
       [product_id]
@@ -591,9 +648,34 @@ export const updateListing = async (req, res) => {
     const b = req.body;
     const toNum = (v, prev) => (v ? Number(v) : prev);
 
-    // Handle Coordinates (Allow 0 as a valid coordinate)
-    const newLat = b.latitude !== undefined && b.latitude !== "" ? Number(b.latitude) : Number(listing.latitude);
-    const newLng = b.longitude !== undefined && b.longitude !== "" ? Number(b.longitude) : Number(listing.longitude);
+    // 1. Determine Address Fields (New vs Old)
+    const newAddr = b.address ?? listing.address;
+    const newCity = b.city ?? listing.city;
+    const newState = b.state ?? listing.state;
+    const newCountry = b.country ?? listing.country;
+    const newZip = b.zip_code || b.zipCode || listing.zip_code; // Handle zip_code
+
+    // 2. Handle Coordinates (Keep existing if not provided)
+    let newLat = b.latitude !== undefined && b.latitude !== "" ? Number(b.latitude) : Number(listing.latitude);
+    let newLng = b.longitude !== undefined && b.longitude !== "" ? Number(b.longitude) : Number(listing.longitude);
+
+    // 3. AUTO-GEOCODE: If address changed BUT coords were not manually provided
+    const addressChanged = 
+        (b.address && b.address !== listing.address) ||
+        (b.city && b.city !== listing.city) ||
+        (b.state && b.state !== listing.state) ||
+        (b.country && b.country !== listing.country) ||
+        ((b.zip_code || b.zipCode) && (b.zip_code || b.zipCode) !== listing.zip_code);
+
+    if (addressChanged && (!b.latitude || !b.longitude)) {
+        console.log("📍 Address changed, recalculating coordinates...");
+        const coords = await getCoordinates(newAddr, newCity, newState, newCountry, newZip);
+        if (coords) {
+            newLat = coords.lat;
+            newLng = coords.lng;
+            console.log("✅ New Coords:", newLat, newLng);
+        }
+    }
 
     const params = [
       b.title ?? listing.title,
@@ -604,10 +686,10 @@ export const updateListing = async (req, res) => {
       b.category ?? listing.category,
       b.property_type || b.propertyType || listing.property_type,
       b.listing_type || b.listingType || listing.listing_type,
-      b.address ?? listing.address,
-      b.city ?? listing.city,
-      b.state ?? listing.state,
-      b.country ?? listing.country,
+      newAddr, // Updated Address
+      newCity, // Updated City
+      newState, // Updated State
+      newCountry, // Updated Country
       toNum(b.bedrooms, listing.bedrooms),
       toNum(b.bathrooms, listing.bathrooms),
       b.parking ?? listing.parking,
@@ -626,9 +708,10 @@ export const updateListing = async (req, res) => {
       b.contact_phone || b.contactPhone || listing.contact_phone,
       b.contact_method || b.contactMethod || listing.contact_method,
       agentEmail,
-      newLat, // 👈 New Latitude
-      newLng, // 👈 New Longitude
-      product_id,
+      newLat, // 👈 Updated Latitude
+      newLng, // 👈 Updated Longitude
+      newZip, // 👈 NEW: Zip Code (Param 33)
+      product_id, // 👈 WHERE clause (Param 34)
     ];
 
     const q = `
@@ -643,9 +726,9 @@ export const updateListing = async (req, res) => {
         virtual_tour_url=$24, virtual_tour_public_id=$25,
         contact_name=$26, contact_email=$27, contact_phone=$28, contact_method=$29,
         email=$30,
-        latitude=$31, longitude=$32,
+        latitude=$31, longitude=$32, zip_code=$33,
         updated_at=NOW()
-      WHERE product_id=$33
+      WHERE product_id=$34
       RETURNING *;
     `;
 
@@ -690,7 +773,6 @@ export const updateListing = async (req, res) => {
     });
   }
 };
-
 
 
 /* -------------------------------------------------------
@@ -1198,5 +1280,108 @@ export const getPublicAgentProfile = async (req, res) => {
   } catch (err) {
     console.error("[GetPublicAgent] Error:", err);
     res.status(500).json({ message: "Server Error" });
+  }
+};
+
+
+
+export const analyzeListing = async (req, res) => {
+  try {
+    const { product_id } = req.params;
+    console.log(`🤖 AI Analyzing Listing: ${product_id}...`);
+    
+    // Call the service logic
+    const report = await performFullAnalysis(product_id);
+    
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ message: "AI Analysis failed", error: err.message });
+  }
+};
+
+
+
+/* -------------------------------------------------------
+   BATCH AI ANALYSIS (Auto-Approve/Reject)
+------------------------------------------------------- */
+export const batchAnalyzeListings = async (req, res) => {
+  try {
+    console.log("🚀 Starting Batch AI Analysis...");
+
+    // 1. Get all PENDING listings
+    const pendingListings = await pool.query(
+      `SELECT product_id, agent_unique_id, title FROM listings WHERE status = 'pending'`
+    );
+
+    if (pendingListings.rows.length === 0) {
+      return res.json({ message: "No pending listings to analyze." });
+    }
+
+    const results = { approved: 0, rejected: 0, failed: 0 };
+
+    // 2. Process each listing (Loop)
+    for (const listing of pendingListings.rows) {
+      try {
+        // Run the AI Logic we created earlier
+        const report = await performFullAnalysis(listing.product_id);
+        
+        let newStatus = 'pending';
+        let notificationMsg = "";
+
+        // 3. DECISION LOGIC (Threshold: 75%)
+        if (report.score >= 75) {
+            newStatus = 'approved';
+            results.approved++;
+            notificationMsg = `Congratulations! Your listing "${listing.title}" passed AI verification and has been approved.`;
+        } else {
+            newStatus = 'rejected';
+            results.rejected++;
+            // Construct specific rejection reason from AI flags
+            const reasons = report.flags.join(". ");
+            notificationMsg = `Your listing "${listing.title}" was rejected by our verification system. Issues detected: ${reasons}. Please update the listing details and photos.`;
+        }
+
+        // 4. Update Database Status
+        await pool.query(
+            `UPDATE listings SET status = $1, updated_at = NOW() WHERE product_id = $2`,
+            [newStatus, listing.product_id]
+        );
+
+        // 5. Create Notification for Agent
+        await pool.query(
+            `INSERT INTO notifications (receiver_id, product_id, type, title, message)
+             VALUES ($1, $2, 'listing_status', $3, $4)`,
+            [
+              listing.agent_unique_id, 
+              listing.product_id, 
+              newStatus === 'approved' ? 'Listing Approved' : 'Listing Rejected',
+              notificationMsg
+            ]
+        );
+
+        // 6. Real-time Socket Alert (If agent is online)
+        // Ensure req.io is available (passed from server.js)
+        if (req.io) {
+            req.io.to(listing.agent_unique_id).emit("notification", {
+                title: newStatus === 'approved' ? 'Listing Approved' : 'Action Required',
+                message: notificationMsg
+            });
+        }
+
+      } catch (err) {
+        console.error(`Failed to analyze ${listing.product_id}:`, err.message);
+        results.failed++;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Batch Analysis Complete.`,
+      stats: results
+    });
+
+  } catch (err) {
+    console.error("Batch Analysis Error:", err);
+    res.status(500).json({ message: "Server Error during batch analysis" });
   }
 };
