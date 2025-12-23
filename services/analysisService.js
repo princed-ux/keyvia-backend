@@ -1,24 +1,22 @@
 import { pool } from "../db.js";
-import { analyzeListingPhotos } from "./aiService.js"; // Import the AI Logic
+import { analyzeListingPhotos, analyzeTextQuality } from "./aiService.js";
 
-// ✅ We EXPORT this function so the Controller can use it
 export const performFullAnalysis = async (listingId) => {
   const report = {
     listingId,
     score: 100,
     flags: [],
+    textCheck: "pending",
     imageCheck: "pending",
     locationCheck: "pending",
     agentConsistency: "pending",
+    verdict: "Manual Review", // Default state
   };
 
   try {
-    // 1. Fetch Full Data (Listing + Agent Profile)
+    // 1. Fetch Full Listing Data + Agent Profile
     const res = await pool.query(`
-      SELECT l.*, 
-             p.country as agent_country, 
-             p.city as agent_city,
-             p.avatar_url as agent_avatar
+      SELECT l.*, p.country as agent_country 
       FROM listings l
       JOIN profiles p ON l.agent_unique_id = p.unique_id
       WHERE l.product_id = $1
@@ -27,50 +25,90 @@ export const performFullAnalysis = async (listingId) => {
     const data = res.rows[0];
     if (!data) throw new Error("Listing not found");
 
-    // --- CHECK 1: IMAGE RECOGNITION (Is it a house?) ---
-    const photoUrls = (data.photos || []).map(p => typeof p === 'string' ? JSON.parse(p).url : p.url);
-    if (photoUrls.length > 0) {
-        const isHouse = await analyzeListingPhotos(photoUrls); 
-        if (isHouse) {
-            report.imageCheck = "passed";
-        } else {
-            report.imageCheck = "failed";
-            report.score -= 40;
-            report.flags.push("Photos do not appear to be real estate.");
-        }
-    } else {
-        report.imageCheck = "warning"; 
-        report.flags.push("No photos available to analyze.");
+    // ----------------------------------------------------
+    // 🚀 STEP 1: STRICT TEXT & ADDRESS ANALYSIS
+    // ----------------------------------------------------
+    // Checks for gibberish, spam patterns, and address validity
+    const textResult = analyzeTextQuality(
+      data.title || "", 
+      data.description || "", 
+      data.address || ""
+    );
+    
+    if (!textResult.valid) {
+        report.textCheck = "failed";
+        report.score = 0; // Immediate Fail
+        report.flags.push(textResult.reason); // e.g. "Title contains spam patterns"
+        report.verdict = "Rejected"; 
+        return report; // 🛑 STOP ANALYSIS HERE
     }
+    report.textCheck = "passed";
 
-    // --- CHECK 2: LOCATION ACCURACY (Did Geocoding work?) ---
-    // We check if lat/lng are 0,0 or null
+    // ----------------------------------------------------
+    // 🚀 STEP 2: COORDINATE CHECK
+    // ----------------------------------------------------
+    // Checks if the listing is stuck in the ocean (0,0)
     if (!data.latitude || !data.longitude || (parseFloat(data.latitude) === 0 && parseFloat(data.longitude) === 0)) {
         report.locationCheck = "failed";
-        report.score -= 30;
-        report.flags.push("Address could not be verified on the map.");
-    } else {
-        report.locationCheck = "passed";
+        report.score = 0; // Immediate Fail
+        report.flags.push("Location coordinates are invalid (0,0) or missing.");
+        report.verdict = "Rejected";
+        return report; // 🛑 STOP HERE
+    }
+    report.locationCheck = "passed";
+
+    // ----------------------------------------------------
+    // 🚀 STEP 3: STRICT IMAGE & ROOM ANALYSIS
+    // ----------------------------------------------------
+    const photoUrls = (data.photos || []).map(p => typeof p === 'string' ? JSON.parse(p).url : p.url);
+    
+    if (photoUrls.length === 0) {
+        report.imageCheck = "failed";
+        report.score = 0;
+        report.flags.push("No photos provided. Listing rejected.");
+        report.verdict = "Rejected";
+        return report;
     }
 
-    // --- CHECK 3: AGENT CONSISTENCY (Does Agent Country match Listing?) ---
+    // Pass Property Type so AI knows what rooms to look for (e.g. "Land" vs "House")
+    const imageResult = await analyzeListingPhotos(photoUrls, data.property_type || "House");
+
+    if (!imageResult.valid) {
+        report.imageCheck = "failed";
+        report.score = 0; // Immediate Fail
+        report.flags.push(imageResult.reason); // e.g. "Missing required room: Kitchen"
+        report.verdict = "Rejected";
+        return report; // 🛑 STOP HERE
+    }
+    report.imageCheck = "passed";
+
+    // ----------------------------------------------------
+    // 🚀 STEP 4: AGENT CONSISTENCY (Minor Check)
+    // ----------------------------------------------------
+    // Warns if the agent is in a different country than the property
     if (data.country && data.agent_country) {
         const listingCountry = data.country.toLowerCase().trim();
         const agentCountry = data.agent_country.toLowerCase().trim();
-        
+
         if (listingCountry !== agentCountry) {
             report.agentConsistency = "warning";
-            report.score -= 10;
-            report.flags.push(`Agent location (${data.agent_country}) differs from property country (${data.country}).`);
+            report.score -= 10; 
+            report.flags.push(`Property country (${data.country}) does not match Agent location (${data.agent_country}).`);
         } else {
             report.agentConsistency = "passed";
         }
     }
 
-    // --- FINAL VERDICT ---
-    if (report.score >= 80) report.verdict = "Safe to Approve";
-    else if (report.score >= 50) report.verdict = "Manual Review Needed";
-    else report.verdict = "High Risk";
+    // ----------------------------------------------------
+    // 🏁 FINAL VERDICT
+    // ----------------------------------------------------
+    // If we survived all strict checks, the score is likely 90-100.
+    if (report.score >= 90) {
+        report.verdict = "Safe to Approve";
+    } else {
+        // If score dropped (e.g. agent consistency warning), flag for manual review
+        report.verdict = "Manual Review Needed";
+    }
 
     return report;
 

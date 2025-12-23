@@ -1285,103 +1285,121 @@ export const getPublicAgentProfile = async (req, res) => {
 
 
 
+/* -------------------------------------------------------
+   SINGLE AI ANALYSIS
+   
+------------------------------------------------------- */
 export const analyzeListing = async (req, res) => {
   try {
     const { product_id } = req.params;
     console.log(`🤖 AI Analyzing Listing: ${product_id}...`);
     
-    // Call the service logic
+    // Call the service logic (Now returns strict verdict & reason)
     const report = await performFullAnalysis(product_id);
     
+    // Optional: Save the analysis result to the DB immediately
+    // We store the reason in 'admin_notes' so the agent can see it later
+    const reason = report.flags.join(". ");
+    await pool.query(
+        `UPDATE listings SET admin_notes = $1 WHERE product_id = $2`,
+        [reason, product_id]
+    );
+
     res.json(report);
   } catch (err) {
     res.status(500).json({ message: "AI Analysis failed", error: err.message });
   }
 };
 
-
-
 /* -------------------------------------------------------
-   BATCH AI ANALYSIS (Auto-Approve/Reject)
+   BATCH AI ANALYSIS (Strict Mode)
+   
+
+[Image of Batch Processing Diagram]
+
 ------------------------------------------------------- */
 export const batchAnalyzeListings = async (req, res) => {
   try {
-    console.log("🚀 Starting Batch AI Analysis...");
+    console.log("🚀 Starting Strict Batch Analysis...");
 
-    // 1. Get all PENDING listings
+    // 1. Get ALL Pending Listings
     const pendingListings = await pool.query(
       `SELECT product_id, agent_unique_id, title FROM listings WHERE status = 'pending'`
     );
 
-    if (pendingListings.rows.length === 0) {
-      return res.json({ message: "No pending listings to analyze." });
-    }
+    const total = pendingListings.rows.length;
+    if (total === 0) return res.json({ message: "No pending listings." });
 
     const results = { approved: 0, rejected: 0, failed: 0 };
+    
+    // 2. Process in CHUNKS
+    const CHUNK_SIZE = 5; 
+    const items = pendingListings.rows;
 
-    // 2. Process each listing (Loop)
-    for (const listing of pendingListings.rows) {
-      try {
-        // Run the AI Logic we created earlier
-        const report = await performFullAnalysis(listing.product_id);
+    for (let i = 0; i < total; i += CHUNK_SIZE) {
+        const chunk = items.slice(i, i + CHUNK_SIZE);
         
-        let newStatus = 'pending';
-        let notificationMsg = "";
+        await Promise.all(chunk.map(async (listing) => {
+            try {
+                const report = await performFullAnalysis(listing.product_id);
+                
+                let newStatus = 'pending';
+                let notificationTitle = "";
+                let notificationMsg = "";
+                let adminNote = ""; 
 
-        // 3. DECISION LOGIC (Threshold: 75%)
-        if (report.score >= 75) {
-            newStatus = 'approved';
-            results.approved++;
-            notificationMsg = `Congratulations! Your listing "${listing.title}" passed AI verification and has been approved.`;
-        } else {
-            newStatus = 'rejected';
-            results.rejected++;
-            // Construct specific rejection reason from AI flags
-            const reasons = report.flags.join(". ");
-            notificationMsg = `Your listing "${listing.title}" was rejected by our verification system. Issues detected: ${reasons}. Please update the listing details and photos.`;
-        }
+                if (report.verdict === 'Safe to Approve') {
+                    newStatus = 'approved';
+                    results.approved++;
+                    notificationTitle = "Listing Approved";
+                    notificationMsg = `Congratulations! Your listing "${listing.title}" passed AI verification and is now approved.`;
+                    adminNote = "Verified by AI.";
+                } else {
+                    newStatus = 'rejected';
+                    results.rejected++;
+                    const reasons = report.flags.length > 0 ? report.flags.join(". ") : "General quality standards not met.";
+                    notificationTitle = "Listing Rejected";
+                    notificationMsg = `Your listing "${listing.title}" was rejected. Issue: ${reasons}`;
+                    adminNote = reasons;
+                }
 
-        // 4. Update Database Status
-        await pool.query(
-            `UPDATE listings SET status = $1, updated_at = NOW() WHERE product_id = $2`,
-            [newStatus, listing.product_id]
-        );
+                // 3. Update Database
+                await pool.query(
+                    `UPDATE listings 
+                     SET status = $1, admin_notes = $2, updated_at = NOW() 
+                     WHERE product_id = $3`,
+                    [newStatus, adminNote, listing.product_id]
+                );
 
-        // 5. Create Notification for Agent
-        await pool.query(
-            `INSERT INTO notifications (receiver_id, product_id, type, title, message)
-             VALUES ($1, $2, 'listing_status', $3, $4)`,
-            [
-              listing.agent_unique_id, 
-              listing.product_id, 
-              newStatus === 'approved' ? 'Listing Approved' : 'Listing Rejected',
-              notificationMsg
-            ]
-        );
+                // 4. Notify Agent (✅ FIXED ARRAY COUNT)
+                await pool.query(
+                    `INSERT INTO notifications (receiver_id, product_id, type, title, message)
+                     VALUES ($1, $2, 'listing_status', $3, $4)`,
+                    [listing.agent_unique_id, listing.product_id, notificationTitle, notificationMsg]
+                );
 
-        // 6. Real-time Socket Alert (If agent is online)
-        // Ensure req.io is available (passed from server.js)
-        if (req.io) {
-            req.io.to(listing.agent_unique_id).emit("notification", {
-                title: newStatus === 'approved' ? 'Listing Approved' : 'Action Required',
-                message: notificationMsg
-            });
-        }
+                if (req.io) {
+                    req.io.to(listing.agent_unique_id).emit("notification", {
+                        title: notificationTitle,
+                        message: notificationMsg
+                    });
+                }
 
-      } catch (err) {
-        console.error(`Failed to analyze ${listing.product_id}:`, err.message);
-        results.failed++;
-      }
+            } catch (e) {
+                console.error(`Error processing ${listing.product_id}`, e);
+                results.failed++;
+            }
+        }));
     }
 
     res.json({
       success: true,
-      message: `Batch Analysis Complete.`,
+      message: `Analyzed ${total} listings.`,
       stats: results
     });
 
   } catch (err) {
-    console.error("Batch Analysis Error:", err);
-    res.status(500).json({ message: "Server Error during batch analysis" });
+    console.error("Batch Error:", err);
+    res.status(500).json({ message: "Server Error" });
   }
 };

@@ -10,6 +10,7 @@
   "dependencies": {
     "@cloudflare/kv-asset-handler": "^0.4.1",
     "@supabase/supabase-js": "^2.85.0",
+    "@tensorflow-models/blazeface": "^0.1.0",
     "@tensorflow-models/mobilenet": "^2.1.1",
     "@tensorflow/tfjs": "^4.22.0",
     "aws-sdk": "^2.1692.0",

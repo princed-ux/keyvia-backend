@@ -9,37 +9,38 @@ const validateProfile = (data) => {
 };
 
 // ------------------ 1. GET PRIVATE PROFILE ------------------
-// Fetches the logged-in user's profile (Agent, Landlord, or Buyer)
 export const getProfile = async (req, res) => {
   try {
     const { unique_id, source } = req.user;
 
-    // Define all columns to fetch (Shared + Agent + Buyer)
+    // ✅ Added verification fields
     const columns = `
       unique_id, full_name, username, email, phone, gender, country, city, bio, avatar_url,
       social_tiktok, social_instagram, social_facebook, social_linkedin, social_twitter,
       role, special_id, created_at,
+      
+      -- Verification Fields
+      verification_status, rejection_reason,
+
       -- Agent Fields
       agency_name, license_number, experience,
+      
       -- Buyer Fields
       preferred_location, budget_min, budget_max, property_type, move_in_date
     `;
 
-    // Try to fetch profile by unique_id
     let result = await pool.query(
       `SELECT ${columns} FROM profiles WHERE unique_id = $1`,
       [unique_id]
     );
 
-    // If no profile exists but user came from 'users' table, auto-create one
     if (!result.rows.length && source === "users") {
       await pool.query(
-        `INSERT INTO profiles (unique_id, full_name, email, role)
-         VALUES ($1, $2, $3, $4)`,
+        `INSERT INTO profiles (unique_id, full_name, email, role, verification_status)
+         VALUES ($1, $2, $3, $4, 'pending')`, // Default to pending
         [unique_id, req.user.name, req.user.email, req.user.role]
       );
 
-      // Fetch again after insert
       result = await pool.query(
         `SELECT ${columns} FROM profiles WHERE unique_id = $1`,
         [unique_id]
@@ -58,27 +59,24 @@ export const getProfile = async (req, res) => {
 };
 
 // ------------------ 2. UPDATE PRIVATE PROFILE ------------------
-// Updates profile data. Handles Agent, Landlord, AND Buyer fields.
 export const updateProfile = async (req, res) => {
   try {
     const { unique_id } = req.user;
 
     const {
-      // Shared Fields
       full_name, username, phone, gender, country, city, bio,
-      // Social Media
       social_tiktok, social_instagram, social_facebook, social_linkedin, social_twitter,
-      // Agent/Landlord Fields
       agency_name, license_number, experience,
-      // ✅ Buyer Fields (New)
       preferred_location, budget_min, budget_max, property_type, move_in_date
     } = req.body;
 
-    // Validation
     const errors = validateProfile({ full_name, username });
     if (Object.keys(errors).length) return res.status(400).json({ errors });
 
-    // ✅ Update Query
+    // ✅ Logic: If profile is edited, reset status to 'pending' unless it was already 'pending'
+    // This forces re-verification if they change critical info.
+    const resetStatus = 'pending'; 
+
     const result = await pool.query(
       `UPDATE profiles SET
         full_name        = $1,
@@ -89,58 +87,38 @@ export const updateProfile = async (req, res) => {
         city             = $6,
         bio              = $7,
         
-        -- Agent Fields
         agency_name      = $8,
         license_number   = $9,
         experience       = $10,
 
-        -- Socials
         social_tiktok    = $11,
         social_instagram = $12,
         social_facebook  = $13,
         social_linkedin  = $14,
         social_twitter   = $15,
 
-        -- Buyer Fields
         preferred_location = $16,
         budget_min         = $17,
         budget_max         = $18,
         property_type      = $19,
         move_in_date       = $20,
 
+        verification_status = $21, -- ✅ Reset to Pending
         updated_at       = NOW()
-       WHERE unique_id   = $21
-       RETURNING *`, // Return updated row
+       WHERE unique_id   = $22
+       RETURNING *`,
       [
-        full_name,
-        username,
-        phone || null,
-        gender || null,
-        country || null,
-        city || null,
-        bio || null,
-        // Agent Params
-        agency_name || null,
-        license_number || null,
-        experience || null,
-        // Social Params
-        social_tiktok || null,
-        social_instagram || null,
-        social_facebook || null,
-        social_linkedin || null,
-        social_twitter || null,
-        // Buyer Params
-        preferred_location || null,
-        budget_min || null,
-        budget_max || null,
-        property_type || null,
-        move_in_date || null, // Ensure frontend sends 'YYYY-MM-DD' or null
+        full_name, username, phone || null, gender || null, country || null, city || null, bio || null,
+        agency_name || null, license_number || null, experience || null,
+        social_tiktok || null, social_instagram || null, social_facebook || null, social_linkedin || null, social_twitter || null,
+        preferred_location || null, budget_min || null, budget_max || null, property_type || null, move_in_date || null,
         
-        unique_id // $21
+        resetStatus, // $21
+        unique_id    // $22
       ]
     );
 
-    // Sync Name with Users Table (Optional but keeps consistency)
+    // Sync Users Table
     await pool.query(
       `UPDATE users SET name = $1 WHERE unique_id = $2`,
       [full_name, unique_id]
@@ -150,35 +128,50 @@ export const updateProfile = async (req, res) => {
 
   } catch (err) {
     console.error("❌ PUT /profile error:", err);
-
-    if (err.code === "23505") { // Unique constraint violation (e.g. username taken)
+    if (err.code === "23505") {
       return res.status(400).json({ message: "Username already exists" });
     }
-
     res.status(500).json({ message: "Server error updating profile" });
   }
 };
 
-// ------------------ 3. GET PUBLIC PROFILE ------------------
-// Fetch another user's public info (e.g. /profile/username)
+// ------------------ 3. UPDATE AVATAR (Separate Endpoint) ------------------
+// Also resets verification status
+export const updateAvatar = async (req, res) => {
+    try {
+        const { unique_id } = req.user;
+        const avatarUrl = req.file ? req.file.path : null; // Cloudinary URL
+
+        if (!avatarUrl) return res.status(400).json({ message: "No file uploaded" });
+
+        const result = await pool.query(
+            `UPDATE profiles 
+             SET avatar_url = $1, verification_status = 'pending', updated_at = NOW() 
+             WHERE unique_id = $2 
+             RETURNING avatar_url`,
+            [avatarUrl, unique_id]
+        );
+
+        res.json({ message: "Avatar updated", avatar_url: result.rows[0].avatar_url });
+    } catch (err) {
+        console.error("❌ Avatar Update Error:", err);
+        res.status(500).json({ message: "Avatar upload failed" });
+    }
+};
+
+// ------------------ 4. GET PUBLIC PROFILE ------------------
 export const getPublicProfile = async (req, res) => {
   try {
     const { username } = req.params;
 
-    // Fetch public data (safe to expose)
     const result = await pool.query(
       `SELECT
         unique_id, full_name, username, bio, avatar_url,
         gender, country, city, role, created_at,
+        verification_status, -- Public needs to know if agent is verified
         
-        -- Agent Stuff
         agency_name, license_number, experience,
-        
-        -- Socials
-        social_tiktok, social_instagram, social_facebook, social_linkedin, social_twitter,
-
-        -- Buyer Stuff (Optional: Decide if you want this public)
-        preferred_location, property_type
+        social_tiktok, social_instagram, social_facebook, social_linkedin, social_twitter
        FROM profiles
        WHERE username = $1`,
       [username]
