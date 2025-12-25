@@ -10,7 +10,13 @@ import {
   resetPassword,
   logout,
   refresh,
+  sendPhoneOtp,
+  verifyPhoneOtp,
+  finishOnboarding,
 } from "../controllers/authController.js";
+
+// ✅ IMPORT THE MIDDLEWARE HERE
+import { protect } from "../middleware/authMiddleware.js"; 
 
 const router = express.Router();
 
@@ -50,5 +56,11 @@ router.post("/logout", logout);
 
 // ADD THIS ROUTE
 router.post("/refresh", refresh);
+
+// ✅ Add Phone Verification Routes (Protected ensures we know WHO is verifying)
+router.post("/send-otp", protect, sendPhoneOtp);
+router.post("/verify-otp", protect, verifyPhoneOtp);
+
+router.put("/onboarding/complete", protect, finishOnboarding);
 
 export default router;

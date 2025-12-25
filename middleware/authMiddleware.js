@@ -8,7 +8,6 @@ const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET;
 async function findUserByUniqueId(unique_id) {
   try {
     // 1. Try PROFILES table
-    // ✅ Added is_super_admin to query
     const profileQ = await pool.query(
       `SELECT id, unique_id, username, full_name, email, role, is_admin, is_super_admin, avatar_url
        FROM profiles WHERE unique_id=$1`,
@@ -23,15 +22,14 @@ async function findUserByUniqueId(unique_id) {
         name: p.full_name || p.username,
         email: p.email,
         role: p.role,
-        is_admin: !!p.is_admin,             // Force boolean
-        is_super_admin: !!p.is_super_admin, // ✅ Force boolean
+        is_admin: !!p.is_admin,            
+        is_super_admin: !!p.is_super_admin, 
         avatar_url: p.avatar_url || null,
         source: "profile",
       };
     }
 
     // 2. Try USERS table
-    // ✅ Added is_super_admin to query
     const userQ = await pool.query(
       `SELECT id, unique_id, name, email, role, is_admin, is_super_admin
        FROM users WHERE unique_id=$1`,
@@ -46,8 +44,8 @@ async function findUserByUniqueId(unique_id) {
         name: u.name,
         email: u.email,
         role: u.role,
-        is_admin: !!u.is_admin,             // Force boolean
-        is_super_admin: !!u.is_super_admin, // ✅ Force boolean
+        is_admin: !!u.is_admin,            
+        is_super_admin: !!u.is_super_admin, 
         avatar_url: null,
         source: "users",
       };
@@ -82,7 +80,6 @@ export const authenticateAndAttachUser = async (req, res, next) => {
     const user = await findUserByUniqueId(decoded.unique_id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // Attach full user object (including is_super_admin) to request
     req.user = { ...user, token_payload: decoded };
     next();
   } catch (err) {
@@ -95,7 +92,6 @@ export const authenticateAndAttachUser = async (req, res, next) => {
 export const verifyAdmin = (req, res, next) => {
   if (!req.user) return res.status(401).json({ message: "Unauthorized: No user attached" });
 
-  // ✅ Updated Check: Role OR Admin Flag OR Super Admin Flag
   if (
     req.user.role === "admin" || 
     req.user.is_admin === true || 
@@ -107,7 +103,7 @@ export const verifyAdmin = (req, res, next) => {
   return res.status(403).json({ message: "Forbidden: Admins only" });
 };
 
-// ---------------- Super Admin Middleware (Optional but Good) ----------------
+// ---------------- Super Admin Middleware ----------------
 export const verifySuperAdmin = (req, res, next) => {
   if (!req.user) return res.status(401).json({ message: "Unauthorized" });
 
@@ -125,7 +121,6 @@ export const verifySelfOrAdmin = async (req, res, next) => {
     const requester = req.user;
     if (!requester) return res.status(401).json({ message: "Unauthorized" });
 
-    // ✅ Fast Path: Check if requester is Admin OR Super Admin
     if (
       requester.role === "admin" || 
       requester.is_admin === true || 
@@ -138,7 +133,6 @@ export const verifySelfOrAdmin = async (req, res, next) => {
     if (!userResult.rows.length) return res.status(404).json({ message: "User not found" });
 
     const user = userResult.rows[0];
-    // Check ownership
     if (requester.id === user.id) return next();
 
     return res.status(403).json({ message: "Unauthorized access" });
@@ -148,7 +142,10 @@ export const verifySelfOrAdmin = async (req, res, next) => {
   }
 };
 
-// ---------------- Aliases for backward compatibility ----------------
+// ---------------- Aliases ----------------
 export const authenticate = authenticateAndAttachUser;
 export const verifyToken = authenticateAndAttachUser;
 export const authenticateToken = authenticateAndAttachUser;
+
+// ✅ ADD THIS LINE TO FIX THE ERROR
+export const protect = authenticateAndAttachUser;
