@@ -24,6 +24,7 @@ import agentRoutes from "./routes/agents.js";
 import ownerRoutes from "./routes/ownerRoutes.js";
 import favoriteRoutes from "./routes/favorites.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import superAdminRoutes from "./routes/superAdminRoutes.js";
 
 dotenv.config();
 
@@ -86,6 +87,7 @@ app.use("/agents", agentRoutes);
 app.use("/owners", ownerRoutes);
 app.use("/api/favorites", favoriteRoutes)
 app.use("/api/admin", adminRoutes);
+app.use("/api/super-admin", superAdminRoutes);
  
 // Root Route
 app.get("/", (req, res) => {
