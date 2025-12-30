@@ -67,3 +67,53 @@ export const getDashboardStats = async (req, res) => {
     res.status(500).json({ message: "Server error fetching stats" });
   }
 }; 
+
+// ... existing imports
+
+// GET ALL USERS
+export const getAllUsers = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, unique_id, name, email, role, created_at, is_banned 
+      FROM users 
+      WHERE role != 'superadmin' 
+      ORDER BY created_at DESC
+    `);
+    res.json({ users: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// DELETE USER
+export const deleteUser = async (req, res) => {
+  const { id } = req.params; // Using unique_id
+  try {
+    // 1. Delete associated data (Optional: Postgres CASCADE handles this if set up, but safe to delete manually)
+    // For now, we assume database constraints (ON DELETE CASCADE) handle listings/profiles.
+    
+    const result = await pool.query("DELETE FROM users WHERE unique_id = $1 RETURNING *", [id]);
+    
+    if (result.rowCount === 0) return res.status(404).json({ message: "User not found" });
+
+    res.json({ message: "User deleted successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Delete failed" });
+  }
+};
+
+// BAN / UNBAN USER
+export const toggleBanUser = async (req, res) => {
+  const { id } = req.params;
+  const { ban } = req.body; // true = ban, false = unban
+
+  try {
+    await pool.query("UPDATE users SET is_banned = $1 WHERE unique_id = $2", [ban, id]);
+    res.json({ message: ban ? "User banned successfully." : "User unbanned successfully." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Action failed" });
+  }
+};

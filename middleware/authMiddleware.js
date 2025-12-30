@@ -1,4 +1,3 @@
-// middleware/authMiddleware.js
 import jwt from "jsonwebtoken";
 import { pool } from "../db.js";
 
@@ -7,7 +6,39 @@ const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET;
 // ---------------- Helper ----------------
 async function findUserByUniqueId(unique_id) {
   try {
-    // 1. Try PROFILES table
+    // 1. Try USERS table first (Primary source for Auth & Ban status)
+    // We prioritize USERS table now because that is where the 'is_banned' flag lives.
+    const userQ = await pool.query(
+      `SELECT id, unique_id, name, email, role, is_admin, is_super_admin, avatar_url,
+              is_banned, ban_reason, banned_until
+       FROM users WHERE unique_id=$1`,
+      [unique_id]
+    );
+    
+    if (userQ.rows.length) {
+      const u = userQ.rows[0];
+      return {
+        id: u.id,
+        unique_id: u.unique_id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        is_admin: !!u.is_admin,            
+        is_super_admin: !!u.is_super_admin, 
+        avatar_url: u.avatar_url || null,
+        
+        // Ban Info
+        is_banned: u.is_banned,
+        ban_reason: u.ban_reason,
+        banned_until: u.banned_until,
+        
+        source: "users",
+      };
+    }
+
+    // 2. Fallback: Try PROFILES table (If you use this for separate profile data)
+    // Note: If you have profiles, ensure they don't bypass the ban check. 
+    // Ideally, profile queries should join users to check ban status.
     const profileQ = await pool.query(
       `SELECT id, unique_id, username, full_name, email, role, is_admin, is_super_admin, avatar_url
        FROM profiles WHERE unique_id=$1`,
@@ -26,28 +57,6 @@ async function findUserByUniqueId(unique_id) {
         is_super_admin: !!p.is_super_admin, 
         avatar_url: p.avatar_url || null,
         source: "profile",
-      };
-    }
-
-    // 2. Try USERS table
-    const userQ = await pool.query(
-      `SELECT id, unique_id, name, email, role, is_admin, is_super_admin
-       FROM users WHERE unique_id=$1`,
-      [unique_id]
-    );
-    
-    if (userQ.rows.length) {
-      const u = userQ.rows[0];
-      return {
-        id: u.id,
-        unique_id: u.unique_id,
-        name: u.name,
-        email: u.email,
-        role: u.role,
-        is_admin: !!u.is_admin,            
-        is_super_admin: !!u.is_super_admin, 
-        avatar_url: null,
-        source: "users",
       };
     }
 
@@ -79,6 +88,41 @@ export const authenticateAndAttachUser = async (req, res, next) => {
 
     const user = await findUserByUniqueId(decoded.unique_id);
     if (!user) return res.status(404).json({ message: "User not found" });
+
+    // =========================================================
+    // ⛔ BAN & SUSPENSION CHECK LOGIC
+    // =========================================================
+    if (user.is_banned) {
+        // Check if it is a Time-Based Suspension
+        if (user.banned_until) {
+            const expiryDate = new Date(user.banned_until);
+            const now = new Date();
+
+            if (now > expiryDate) {
+                // Suspension has expired! Auto-unban the user.
+                await pool.query(
+                    `UPDATE users SET is_banned = FALSE, banned_until = NULL, ban_reason = NULL WHERE unique_id = $1`,
+                    [user.unique_id]
+                );
+                // Allow them to proceed (User is modified in DB, but 'user' var is stale, so we manually update it)
+                user.is_banned = false; 
+            } else {
+                // Still Suspended
+                return res.status(403).json({ 
+                    message: "Account Suspended", 
+                    reason: user.ban_reason || "Temporary suspension",
+                    expires_at: expiryDate 
+                });
+            }
+        } else {
+            // Permanent Ban (banned_until is NULL but is_banned is TRUE)
+            return res.status(403).json({ 
+                message: "Account Permanently Banned", 
+                reason: user.ban_reason || "Violation of terms of service" 
+            });
+        }
+    }
+    // =========================================================
 
     req.user = { ...user, token_payload: decoded };
     next();
@@ -129,11 +173,10 @@ export const verifySelfOrAdmin = async (req, res, next) => {
       return next();
     }
 
-    const userResult = await pool.query(`SELECT id FROM users WHERE id=$1`, [id]);
-    if (!userResult.rows.length) return res.status(404).json({ message: "User not found" });
-
-    const user = userResult.rows[0];
-    if (requester.id === user.id) return next();
+    // Check if checking against self
+    if (requester.unique_id === id || requester.id.toString() === id.toString()) {
+        return next();
+    }
 
     return res.status(403).json({ message: "Unauthorized access" });
   } catch (err) {
@@ -146,6 +189,4 @@ export const verifySelfOrAdmin = async (req, res, next) => {
 export const authenticate = authenticateAndAttachUser;
 export const verifyToken = authenticateAndAttachUser;
 export const authenticateToken = authenticateAndAttachUser;
-
-// ✅ ADD THIS LINE TO FIX THE ERROR
 export const protect = authenticateAndAttachUser;

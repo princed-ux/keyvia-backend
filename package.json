@@ -24,6 +24,7 @@
     "country-state-city": "^3.2.1",
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
+    "firebase-admin": "^13.6.0",
     "jpeg-js": "^0.4.4",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",

@@ -122,7 +122,13 @@ router.get("/public", async (req, res) => {
 });
 
 // ✅ 2. Agent Portfolio
-router.get("/agent", authenticateToken, getAgentListings);
+router.get("/agent", authenticateToken, async (req, res, next) => {
+    // Optional: Explicitly check role here if middleware is missing
+    if (req.user.role !== 'agent' && req.user.role !== 'owner') {
+        return res.status(403).json({ message: "Access denied. Agents/Owners only." });
+    }
+    next();
+}, getAgentListings);
 
 // ✅ 3. Admin Dashboard
 router.get("/admin/all", authenticateToken, verifyAdmin, getAllListingsAdmin);

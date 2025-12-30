@@ -1,20 +1,19 @@
 import express from "express";
-// ✅ Corrected Import Path: Points to authMiddleware.js
-import { verifyToken, verifySuperAdmin } from "../middleware/authMiddleware.js"; 
-import { getDashboardStats } from "../controllers/superAdminController.js";
+import { verifyToken, verifySuperAdmin } from "../middleware/authMiddleware.js";
+import { 
+  getDashboardStats, 
+  getAllUsers, // ✅ Add this
+  deleteUser,  // ✅ Add this
+  toggleBanUser // ✅ Add this
+} from "../controllers/superAdminController.js";
 
 const router = express.Router();
 
-// ==========================================
-// SUPER ADMIN ROUTES
-// ==========================================
-
-// GET /api/super-admin/stats
-// Returns overview data: Revenue, Users, Listings, etc.
 router.get("/stats", verifyToken, verifySuperAdmin, getDashboardStats);
 
-// Future endpoints:
-// router.get("/users", verifyToken, verifySuperAdmin, getAllUsers);
-// router.delete("/users/:id", verifyToken, verifySuperAdmin, deleteUser);
+// ✅ NEW USER MANAGEMENT ROUTES
+router.get("/users", verifyToken, verifySuperAdmin, getAllUsers);
+router.delete("/users/:id", verifyToken, verifySuperAdmin, deleteUser);
+router.put("/users/:id/ban", verifyToken, verifySuperAdmin, toggleBanUser);
 
 export default router;
