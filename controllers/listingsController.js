@@ -869,88 +869,125 @@ export const deleteListing = async (req, res) => {
 };
 
 /* -------------------------------------------------------
-   GET LISTINGS (Public - Supports Filters & Maps)
-   Logic: Only show Approved AND Active (Paid) listings
+   1. GET LISTINGS (Public - /buy, /rent, Homepage)
+   UPDATED: Now returns 'agent_role' (owner/agent)
 ------------------------------------------------------- */
 export const getListings = async (req, res) => {
   try {
-    // 1. Get Query Params (e.g. /api/listings?type=rent)
-    const { type, minPrice, maxPrice, city } = req.query;
+    const { category, search, minLat, maxLat, minLng, maxLng, type, minPrice, maxPrice, city } = req.query;
 
+    let currentUserId = null;
+    // ... (Keep JWT auth logic if you have it) ...
+
+    // ✅ ADDED: p.role as agent_role
     let queryText = `
       SELECT 
-        l.*,
-        p.full_name, p.username, p.phone, p.bio, p.avatar_url, p.agency_name
+        l.*, 
+        p.full_name as agent_name, 
+        p.avatar_url as agent_avatar, 
+        p.agency_name,
+        p.username as agent_username,
+        p.role as agent_role,  -- 👈 NEW: Fetches 'agent' or 'owner'
+        p.phone as agent_phone,
+        CASE WHEN f.product_id IS NOT NULL THEN true ELSE false END as is_favorited
       FROM listings l
-      LEFT JOIN profiles p ON p.unique_id = l.agent_unique_id
+      JOIN profiles p ON l.agent_unique_id = p.unique_id
+      LEFT JOIN favorites f ON l.product_id = f.product_id AND f.user_id = $1
       WHERE l.status = 'approved' 
-      AND l.is_active = true 
+      AND l.is_active = true
     `;
+    
+    const queryParams = [currentUserId];
+    let paramCounter = 2; 
 
-    const params = [];
-    let paramIndex = 1;
+    // --- FILTERS (Combined Logic) ---
+    if (category && category !== 'undefined') {
+      queryText += ` AND (category ILIKE $${paramCounter} OR listing_type ILIKE $${paramCounter})`;
+      queryParams.push(category);
+      paramCounter++;
+    }
 
-    // 2. Filter by Rent vs Sale (Critical for /buy vs /rent pages)
+    // Support for ?type=rent or ?type=sale specific filter
     if (type) {
-      queryText += ` AND l.listing_type = $${paramIndex}`;
-      params.push(type.toLowerCase()); // 'rent' or 'sale'
-      paramIndex++;
+      queryText += ` AND l.listing_type = $${paramCounter}`;
+      queryParams.push(type.toLowerCase());
+      paramCounter++;
     }
 
-    // 3. Optional Filters (Good for Map Search)
     if (city) {
-      queryText += ` AND l.city ILIKE $${paramIndex}`;
-      params.push(`%${city}%`);
-      paramIndex++;
+      queryText += ` AND l.city ILIKE $${paramCounter}`;
+      queryParams.push(`%${city}%`);
+      paramCounter++;
     }
+
     if (minPrice) {
-      queryText += ` AND l.price >= $${paramIndex}`;
-      params.push(minPrice);
-      paramIndex++;
+      queryText += ` AND l.price >= $${paramCounter}`;
+      queryParams.push(minPrice);
+      paramCounter++;
     }
+
     if (maxPrice) {
-      queryText += ` AND l.price <= $${paramIndex}`;
-      params.push(maxPrice);
-      paramIndex++;
+      queryText += ` AND l.price <= $${paramCounter}`;
+      queryParams.push(maxPrice);
+      paramCounter++;
     }
 
-    // Order by activation date so newest paid listings show first
-    queryText += ` ORDER BY l.activated_at DESC`; 
+    if (search) {
+      queryText += ` AND (
+        l.city ILIKE $${paramCounter} OR 
+        l.address ILIKE $${paramCounter} OR 
+        l.state ILIKE $${paramCounter} OR
+        l.country ILIKE $${paramCounter} OR
+        l.zip_code ILIKE $${paramCounter} 
+      )`;
+      queryParams.push(`%${search}%`);
+      paramCounter++;
+    }
 
-    const result = await pool.query(queryText, params);
+    if (minLat && maxLat && minLng && maxLng && !isNaN(Number(minLat))) {
+      queryText += ` 
+        AND l.latitude::numeric >= $${paramCounter} 
+        AND l.latitude::numeric <= $${paramCounter + 1}
+        AND l.longitude::numeric >= $${paramCounter + 2} 
+        AND l.longitude::numeric <= $${paramCounter + 3}
+      `;
+      queryParams.push(minLat, maxLat, minLng, maxLng);
+      paramCounter += 4;
+    }
 
-    // 4. Clean up response for frontend
-    const rows = result.rows.map((r) => {
-      let photos = [];
-      try {
-        photos = typeof r.photos === "string" ? JSON.parse(r.photos) : r.photos || [];
-      } catch {}
-      
-      // Ensure photos have URLs
+    queryText += " ORDER BY l.activated_at DESC NULLS LAST LIMIT 500";
+
+    const result = await pool.query(queryText, queryParams);
+
+    const listings = result.rows.map(l => {
+      let photos = [], features = [];
+      try { photos = typeof l.photos === 'string' ? JSON.parse(l.photos) : (l.photos || []); } catch (e) {}
+      try { features = typeof l.features === 'string' ? JSON.parse(l.features) : (l.features || []); } catch (e) {}
+
+      // Normalize photos
       photos = photos.map(p => ({ url: p.url || p, type: 'image' }));
 
       return {
-        ...r,
+        ...l,
         photos,
-        // Frontend Map needs these explicitly as numbers
-        latitude: r.latitude ? parseFloat(r.latitude) : null,
-        longitude: r.longitude ? parseFloat(r.longitude) : null,
-        
-        // Flatten agent details for easier access
+        features,
+        latitude: l.latitude ? parseFloat(l.latitude) : null,
+        longitude: l.longitude ? parseFloat(l.longitude) : null,
+        // ✅ Structure Agent Info
         agent: {
-          full_name: r.full_name,
-          username: r.username,
-          avatar_url: r.avatar_url,
-          agency_name: r.agency_name,
-          phone: r.phone,
+            name: l.agent_name,
+            avatar: l.agent_avatar,
+            username: l.agent_username,
+            role: l.agent_role, // 'agent' or 'owner'
+            agency: l.agency_name
         }
       };
     });
 
-    res.json(rows);
+    res.json(listings);
   } catch (err) {
-    console.error("[GetListings] Error:", err);
-    res.status(500).json({ message: "Failed to fetch listings" });
+    console.error("❌ Error fetching public listings:", err);
+    res.status(500).json({ error: "Server error" });
   }
 };
 
@@ -1008,18 +1045,21 @@ export const getAgentListings = async (req, res) => {
 };
 
 /* -------------------------------------------------------
-   GET LISTING BY PRODUCT ID
+   2. GET LISTING BY ID (Public Details Page)
+   UPDATED: Now returns 'role'
 ------------------------------------------------------- */
 export const getListingByProductId = async (req, res) => {
   try {
     const { product_id } = req.params;
     const userUniqueId = req.user?.unique_id || null;
 
+    // ✅ ADDED: p.role
     const query = `
       SELECT l.*, 
              p.full_name, p.username, p.avatar_url, p.bio, 
              p.agency_name, p.experience, p.country as agent_country, p.city as agent_city,
-             p.email as agent_email, p.phone as agent_phone
+             p.email as agent_email, p.phone as agent_phone,
+             p.role as agent_role
       FROM listings l
       LEFT JOIN profiles p ON l.agent_unique_id = p.unique_id
       WHERE l.product_id = $1;
@@ -1030,9 +1070,6 @@ export const getListingByProductId = async (req, res) => {
 
     if (!row) return res.status(404).json({ message: "Listing not found" });
 
-    // 🔒 VISIBILITY LOGIC:
-    // 1. Owner can always see it.
-    // 2. Public can ONLY see it if it is APPROVED *AND* ACTIVE (Paid).
     const isOwner = row.agent_unique_id === userUniqueId;
     const isPublicReady = row.status === "approved" && row.is_active === true;
 
@@ -1040,7 +1077,6 @@ export const getListingByProductId = async (req, res) => {
       return res.status(403).json({ message: "This listing is not currently active." });
     }
 
-    // Convert photos
     let photos = [];
     try {
       photos = typeof row.photos === "string" ? JSON.parse(row.photos || "[]") : row.photos || [];
@@ -1050,7 +1086,6 @@ export const getListingByProductId = async (req, res) => {
     res.json({
       ...row,
       photos,
-      // ✅ Ensure coordinates are numbers
       latitude: row.latitude ? parseFloat(row.latitude) : null,
       longitude: row.longitude ? parseFloat(row.longitude) : null,
       agent: {
@@ -1064,7 +1099,8 @@ export const getListingByProductId = async (req, res) => {
         country: row.agent_country,
         city: row.agent_city,
         email: row.agent_email,
-        phone: row.agent_phone
+        phone: row.agent_phone,
+        role: row.agent_role // ✅ Send role to frontend
       },
     });
   } catch (err) {

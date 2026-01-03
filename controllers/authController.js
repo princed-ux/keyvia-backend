@@ -539,36 +539,65 @@ export const verifyFirebasePhone = async (req, res) => {
 // 12. FINISH ONBOARDING (UPSERT PROFILE)
 // ===================================================
 export const finishOnboarding = async (req, res) => {
-  const { country, phone, license_number, experience } = req.body;
+  // ✅ 1. Accept 'role' and 'agency_name' from frontend
+  const { country, phone, license_number, experience, role, agency_name } = req.body;
+  
   const userId = req.user.unique_id;
   const userEmail = req.user.email;
   const userName = req.user.name;
 
   try {
-    // 1. Mark Phone as Verified in USERS table
-    await pool.query(
-      `UPDATE users SET phone_verified = true WHERE unique_id = $1`,
+    // ✅ 2. Update USERS table & RETURNING special_id
+    // We need to fetch the special_id from the users table to send it back to frontend
+    const userRes = await pool.query(
+      `UPDATE users SET phone_verified = true WHERE unique_id = $1 RETURNING special_id`,
       [userId]
     );
+    
+    // Grab the ID to send back
+    const specialId = userRes.rows[0]?.special_id;
 
-    // 2. Create/Update PROFILE
-    // ✅ LOGIC CONFIRMED:
-    // - INSERT: Defaults to 'new' (Good for brand new users)
-    // - UPDATE: Does NOT touch verification_status (Protects "Approved" users from reset)
+    // ✅ 3. Update PROFILE with Role, Agency, and Special ID
+    // We explicitly save the role here so the Admin Panel doesn't have to guess.
     await pool.query(
-      `INSERT INTO profiles (unique_id, email, full_name, country, phone, license_number, experience, verification_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'new') 
+      `INSERT INTO profiles (
+          unique_id, email, full_name, country, phone, 
+          license_number, experience, agency_name, role, special_id, 
+          verification_status
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'new') 
        ON CONFLICT (unique_id) 
        DO UPDATE SET 
          country = EXCLUDED.country,
          phone = EXCLUDED.phone,
          license_number = EXCLUDED.license_number,
          experience = EXCLUDED.experience,
+         agency_name = EXCLUDED.agency_name, -- ✅ Save Agency Name
+         role = EXCLUDED.role,               -- ✅ Save Role ('agent' or 'owner')
+         special_id = EXCLUDED.special_id,   -- ✅ Sync Special ID
          full_name = EXCLUDED.full_name;`,
-      [userId, userEmail, userName, country, phone, license_number, experience]
+      [
+        userId, 
+        userEmail, 
+        userName, 
+        country, 
+        phone, 
+        license_number || null, // Convert empty string to null
+        experience,
+        agency_name || null,    // Convert empty string to null
+        role, 
+        specialId
+      ]
     );
 
-    res.json({ success: true, message: "Onboarding complete." });
+    // ✅ 4. RETURN special_id
+    // This fixes the "N/A" issue in the SideNav immediately after setup
+    res.json({ 
+        success: true, 
+        message: "Onboarding complete.", 
+        special_id: specialId 
+    });
+
   } catch (err) {
     console.error("[FinishOnboarding] Error:", err);
     res.status(500).json({ message: "Server error." });

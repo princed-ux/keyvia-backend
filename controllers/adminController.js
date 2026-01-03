@@ -7,11 +7,14 @@ import { analyzeProfile } from "../services/aiProfileService.js";
 export const getPendingProfiles = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT unique_id, full_name, username, email, avatar_url, country, phone, 
-             license_number, agency_name, bio, created_at, experience, special_id
-      FROM profiles 
-      WHERE verification_status = 'pending'
-      ORDER BY updated_at ASC
+      SELECT 
+        p.unique_id, p.full_name, p.username, p.email, p.avatar_url, 
+        p.country, p.city, p.phone, p.role, 
+        p.license_number, p.agency_name, p.bio, p.created_at, p.experience, p.special_id,
+        0 as review_count  -- ✅ FIXED: Returns 0 instead of crashing on missing 'reviews' table
+      FROM profiles p
+      WHERE p.verification_status = 'pending'
+      ORDER BY p.updated_at ASC
     `);
     res.json(result.rows);
   } catch (err) {
