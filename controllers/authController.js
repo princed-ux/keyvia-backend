@@ -6,7 +6,7 @@ import admin from "../firebaseAdmin.js";
 import {
   sendSignupOtpEmail,
   sendLoginOtpEmail,
-  sendPasswordResetEmail,
+  sendPasswordResetEmail, 
 } from "../utils/sendEmail.js";
 
 // ================= ENV =================
@@ -55,9 +55,16 @@ export const register = async (req, res) => {
     await sendSignupOtpEmail(cleanEmail, code);
     res.json({ success: true, message: "Account created. OTP sent to email." });
   } catch (err) {
-    console.error("[Register]", err);
+    console.error("[Register] Error:", err);
+    
+    // ✅ ADD THIS: If email fails, delete the user so they can try again
+    if (err.code === 'ETIMEDOUT' || err.message.includes("Greeting never received")) {
+        await pool.query("DELETE FROM users WHERE email=$1", [email.toLowerCase().trim()]);
+        return res.status(500).json({ message: "Email service timed out. Please try again." });
+    }
+
     res.status(500).json({ message: "Server error." });
-  }
+}
 };
 
 // ===================================================
@@ -517,9 +524,15 @@ export const verifyFirebasePhone = async (req, res) => {
       [userId]
     );
 
-    // 2. Insert/Update Profile
-    // ✅ FIX: Changed status to 'new' (was 'pending').
-    // This ensures completing phone verification keeps you on "Complete Profile" status.
+    // 2. 🛡️ CLEANUP GHOST PROFILES (The Fix)
+    // If a profile exists with this email but a DIFFERENT ID (from a previous test run), delete it.
+    // This frees up the email so we can use it for the new ID.
+    await pool.query(
+        `DELETE FROM profiles WHERE email = $1 AND unique_id != $2`,
+        [userEmail, userId]
+    );
+
+    // 3. Insert/Update Profile
     await pool.query(
       `INSERT INTO profiles (unique_id, email, full_name, phone, verification_status)
        VALUES ($1, $2, $3, $4, 'new')
@@ -535,30 +548,94 @@ export const verifyFirebasePhone = async (req, res) => {
   }
 };
 
+
 // ===================================================
-// 12. FINISH ONBOARDING (UPSERT PROFILE)
+// 12. FINISH ONBOARDING (UPSERT PROFILE) - ✅ SECURED & TYPED
 // ===================================================
 export const finishOnboarding = async (req, res) => {
-  // ✅ 1. Accept 'role' and 'agency_name' from frontend
-  const { country, phone, license_number, experience, role, agency_name } = req.body;
+  const { 
+      country, 
+      phone, 
+      license_number, 
+      experience, 
+      role, 
+      agency_name,
+      brokerage_address,
+      brokerage_phone
+  } = req.body;
   
   const userId = req.user.unique_id;
   const userEmail = req.user.email;
   const userName = req.user.name;
 
   try {
-    // ✅ 2. Update USERS table & RETURNING special_id
-    // We need to fetch the special_id from the users table to send it back to frontend
-    const userRes = await pool.query(
-      `UPDATE users SET phone_verified = true WHERE unique_id = $1 RETURNING special_id`,
-      [userId]
+    // -----------------------------------------------------
+    // 1. 🛡️ FRAUD PROTECTION: Check for Duplicates
+    // -----------------------------------------------------
+    // If the phone number exists on a DIFFERENT account, block it.
+    // If the license exists on a DIFFERENT account, block it.
+    const duplicateCheck = await pool.query(
+        `SELECT unique_id, email FROM profiles 
+         WHERE (phone = $1 AND unique_id != $3) 
+         OR ($2::text IS NOT NULL AND $2::text != '' AND license_number = $2::text AND unique_id != $3)`,
+        [phone, license_number || '', userId]
+    );
+
+    if (duplicateCheck.rows.length > 0) {
+        return res.status(409).json({ 
+            success: false,
+            message: "Identity Conflict: This Phone Number or License is already linked to another account." 
+        });
+    }
+
+    // -----------------------------------------------------
+    // 2. ID GENERATION
+    // -----------------------------------------------------
+    let specialId;
+    const checkUser = await pool.query("SELECT special_id FROM users WHERE unique_id = $1", [userId]);
+    
+    if (checkUser.rows[0] && checkUser.rows[0].special_id) {
+        specialId = checkUser.rows[0].special_id;
+    } else {
+        // Generate: AGT-XXXXX or OWN-XXXXX
+        specialId = (role === 'agent' ? 'AGT-' : 'OWN-') + Math.random().toString(36).substr(2, 9).toUpperCase(); 
+    }
+
+    // -----------------------------------------------------
+    // 3. UPDATE USERS TABLE (The Authority)
+    // -----------------------------------------------------
+    // ✅ Uses ::text casting to prevent "could not determine data type" errors
+    await pool.query(
+      `UPDATE users 
+       SET 
+         phone_verified = true,
+         role = $2::text, 
+         special_id = $3::text,
+         license_number = $4::text,
+         brokerage_name = $5::text,
+         brokerage_address = $6::text,
+         brokerage_phone = $7::text,
+         verification_tier = CASE 
+            WHEN $2::text = 'agent' AND $4::text IS NOT NULL AND $4::text != '' THEN 'licensed'
+            ELSE 'none'
+         END,
+         is_agent = ($2::text = 'agent'),
+         is_owner = ($2::text = 'owner')
+       WHERE unique_id = $1`,
+      [
+          userId, 
+          role, 
+          specialId,
+          license_number || null, 
+          agency_name || null,
+          brokerage_address || null,
+          brokerage_phone || null
+      ]
     );
     
-    // Grab the ID to send back
-    const specialId = userRes.rows[0]?.special_id;
-
-    // ✅ 3. Update PROFILE with Role, Agency, and Special ID
-    // We explicitly save the role here so the Admin Panel doesn't have to guess.
+    // -----------------------------------------------------
+    // 4. UPDATE PROFILES TABLE (The Public View)
+    // -----------------------------------------------------
     await pool.query(
       `INSERT INTO profiles (
           unique_id, email, full_name, country, phone, 
@@ -572,34 +649,37 @@ export const finishOnboarding = async (req, res) => {
          phone = EXCLUDED.phone,
          license_number = EXCLUDED.license_number,
          experience = EXCLUDED.experience,
-         agency_name = EXCLUDED.agency_name, -- ✅ Save Agency Name
-         role = EXCLUDED.role,               -- ✅ Save Role ('agent' or 'owner')
-         special_id = EXCLUDED.special_id,   -- ✅ Sync Special ID
-         full_name = EXCLUDED.full_name;`,
+         agency_name = EXCLUDED.agency_name,
+         role = EXCLUDED.role,              
+         special_id = EXCLUDED.special_id,   
+         full_name = EXCLUDED.full_name,
+         verification_status = 'new';`, // Status resets to 'new' so Admin verifies the new details
       [
         userId, 
         userEmail, 
         userName, 
         country, 
         phone, 
-        license_number || null, // Convert empty string to null
+        license_number || null, 
         experience,
-        agency_name || null,    // Convert empty string to null
+        agency_name || null,    
         role, 
         specialId
       ]
     );
 
-    // ✅ 4. RETURN special_id
-    // This fixes the "N/A" issue in the SideNav immediately after setup
+    // -----------------------------------------------------
+    // 5. SUCCESS RESPONSE
+    // -----------------------------------------------------
     res.json({ 
         success: true, 
         message: "Onboarding complete.", 
-        special_id: specialId 
+        special_id: specialId,
+        role: role
     });
 
   } catch (err) {
     console.error("[FinishOnboarding] Error:", err);
-    res.status(500).json({ message: "Server error." });
+    res.status(500).json({ message: "Server error during onboarding." });
   }
 };

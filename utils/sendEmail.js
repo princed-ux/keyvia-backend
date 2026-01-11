@@ -7,26 +7,27 @@ const {
   EMAIL_USER,
   EMAIL_PASS,
   CLIENT_URL,
-  SMTP_HOST,
-  SMTP_PORT,
-  SMTP_SECURE,
 } = process.env;
 
 /* ======================================================
    📨 SMTP TRANSPORTER (Robust Configuration)
 ====================================================== */
+// ✅ FIX: Use specific Gmail settings to prevent timeouts
 const transporter = nodemailer.createTransport({
-  host: SMTP_HOST || "smtp.gmail.com",
-  port: Number(SMTP_PORT) || 587,
-  secure: SMTP_SECURE === "true", // true → 465, false → 587
+  host: "smtp.gmail.com",
+  port: 587, // Use 587 for TLS
+  secure: false, // Must be false for port 587
   auth: {
     user: EMAIL_USER,
-    pass: EMAIL_PASS,
+    pass: EMAIL_PASS, // Make sure this is an App Password!
   },
   tls: {
-    rejectUnauthorized: false,
+    ciphers: "SSLv3",
+    rejectUnauthorized: false, // Helps avoid certificate errors in dev
   },
-  connectionTimeout: 10000, // 10 seconds
+  connectionTimeout: 10000, // Wait 10 seconds
+  greetingTimeout: 10000,   // Wait 10 seconds for greeting
+  socketTimeout: 10000,     // Wait 10 seconds for socket
 });
 
 // Verify SMTP on startup
@@ -41,9 +42,8 @@ transporter.verify((error) => {
 /* ======================================================
    🎨 PROFESSIONAL EMAIL TEMPLATE
 ====================================================== */
-// ✅ Your Uploaded Logo URL
 const LOGO_URL = "https://res.cloudinary.com/dcwpytcpc/image/upload/v1767102929/mainLogo_zfcxjf.png"; 
-const BRAND_COLOR = "#09707D"; // Your Teal Color
+const BRAND_COLOR = "#09707D"; 
 
 const emailWrapper = (title, content, footerText = "") => `
 <!DOCTYPE html>
@@ -55,10 +55,7 @@ const emailWrapper = (title, content, footerText = "") => `
     body { margin: 0; padding: 0; background-color: #f4f7f6; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
     .container { width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
     .header { background-color: #ffffff; padding: 30px 0; text-align: center; border-bottom: 1px solid #edf2f7; }
-    
-    /* ✅ LOGO STYLING */
     .logo { width: 150px; height: auto; display: block; margin: 0 auto; }
-
     .content { padding: 40px 30px; text-align: center; color: #333333; }
     .title { color: #1a202c; font-size: 24px; font-weight: 700; margin-bottom: 20px; }
     .text { font-size: 16px; line-height: 1.6; color: #4a5568; margin-bottom: 30px; }
@@ -71,16 +68,13 @@ const emailWrapper = (title, content, footerText = "") => `
 <body>
   <div style="padding: 40px 0;">
     <div class="container">
-      
       <div class="header">
         <img src="${LOGO_URL}" alt="Keyvia" class="logo" />
       </div>
-
       <div class="content">
         <h1 class="title">${title}</h1>
         ${content}
       </div>
-
       <div class="footer">
         <p>${footerText}</p>
         <p>
@@ -88,7 +82,6 @@ const emailWrapper = (title, content, footerText = "") => `
           &copy; ${new Date().getFullYear()} Keyvia. All rights reserved.
         </p>
       </div>
-
     </div>
   </div>
 </body>
@@ -121,9 +114,7 @@ export const sendSignupOtpEmail = async (email, code) => {
     "Verify Your Email",
     `
       <p class="text">Thank you for joining Keyvia! Use the code below to verify your email address and activate your account.</p>
-      
       <div class="otp-box">${code}</div>
-      
       <p class="text" style="font-size: 14px; margin-top: 20px;">
         This code will expire in <strong>1 minute</strong>.<br>
         If you didn't request this, please ignore this email.
@@ -131,7 +122,6 @@ export const sendSignupOtpEmail = async (email, code) => {
     `,
     "Secure Verification"
   );
-
   await sendSafeMail({ to: email, subject: "Verify your email address", html });
 };
 
@@ -143,9 +133,7 @@ export const sendLoginOtpEmail = async (email, code) => {
     "Login Verification",
     `
       <p class="text">We detected a login attempt for your Keyvia account. Please enter the code below to proceed.</p>
-      
       <div class="otp-box">${code}</div>
-      
       <p class="text" style="font-size: 14px; margin-top: 20px;">
         For your security, never share this code with anyone.<br>
         If this wasn't you, please secure your account immediately.
@@ -153,7 +141,6 @@ export const sendLoginOtpEmail = async (email, code) => {
     `,
     "Security Alert"
   );
-
   await sendSafeMail({ to: email, subject: "Your Login Verification Code", html });
 };
 
@@ -161,28 +148,21 @@ export const sendLoginOtpEmail = async (email, code) => {
    ✉️ 3. PASSWORD RESET EMAIL
 ====================================================== */
 export const sendPasswordResetEmail = async (email, name, token) => {
-  // Handle argument shift if name is missing
   if (!token && name) { token = name; }
-
   const resetLink = `${CLIENT_URL}/reset-password/${token}`;
-
   const html = emailWrapper(
     "Reset Password Request",
     `
       <p class="text">We received a request to reset the password for your Keyvia account.</p>
-      
       <a href="${resetLink}" class="btn">Reset Password</a>
-      
       <p class="text" style="margin-top: 30px;">
         Or copy and paste this link into your browser:<br>
         <a href="${resetLink}" style="color:${BRAND_COLOR}; font-size:14px;">${resetLink}</a>
       </p>
-      
       <p class="text" style="font-size: 14px;">This link is valid for <strong>1 hour</strong>.</p>
     `,
     "Account Security"
   );
-
   await sendSafeMail({ to: email, subject: "Reset Your Password", html });
 };
 
@@ -191,22 +171,18 @@ export const sendPasswordResetEmail = async (email, name, token) => {
 ====================================================== */
 export const sendWelcomeEmail = async (email, name) => {
   const loginLink = `${CLIENT_URL}/login`;
-
   const html = emailWrapper(
     `Welcome to Keyvia, ${name}!`,
     `
       <p class="text">
         We are thrilled to have you on board. Keyvia gives you the tools to find, list, and manage properties with ease.
       </p>
-      
       <a href="${loginLink}" class="btn">Go to Dashboard</a>
-      
       <p class="text" style="margin-top: 30px;">
         Get ready to experience the future of real estate management.
       </p>
     `,
     "Welcome Aboard"
   );
-
   await sendSafeMail({ to: email, subject: "Welcome to Keyvia! 🚀", html });
 };

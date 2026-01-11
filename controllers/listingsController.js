@@ -13,47 +13,42 @@ function genAssetId(prefix = "asset") {
   return `${prefix}_${crypto.randomUUID().split("-")[0]}`;
 }
 
-// ✅ SMART GEOCODING HELPER (With Fallback)
+// ✅ HELPER: Sleep function for rate limiting
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ✅ UPDATED: ROBUST GEOCODING HELPER (With Retry Logic)
+// Nominatim allows 1 req/sec. This retry logic prevents crashes under load.
 async function getCoordinates(address, city, state, country, zip) {
-  const userAgent = "KeyviaApp/1.0"; // Required by Nominatim
+  const userAgent = "KeyviaApp/1.0"; 
+  let queryParts = [address, city, state, zip, country].filter(Boolean);
+  if (queryParts.length === 0) return null;
 
-  // 1. Try Full Address
-  let query = [address, city, state, zip, country].filter(Boolean).join(", ");
-  console.log(`🌍 Geocoding Attempt 1 (Full): ${query}`);
-
-  try {
-    let url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
-    let res = await axios.get(url, { headers: { "User-Agent": userAgent } });
-
-    if (res.data && res.data.length > 0) {
-      return { lat: parseFloat(res.data[0].lat), lng: parseFloat(res.data[0].lon) };
-    }
-
-    // 2. Fallback: Try City + State + Country
-    console.log("⚠️ Precise location not found. Trying City level...");
-    query = [city, state, country].filter(Boolean).join(", ");
-    url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
-    res = await axios.get(url, { headers: { "User-Agent": userAgent } });
-
-    if (res.data && res.data.length > 0) {
-      return { lat: parseFloat(res.data[0].lat), lng: parseFloat(res.data[0].lon) };
-    }
-
-    // 3. Fallback: Try State + Country
-    console.log("⚠️ City not found. Trying State level...");
-    query = [state, country].filter(Boolean).join(", ");
-    url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
-    res = await axios.get(url, { headers: { "User-Agent": userAgent } });
-
-    if (res.data && res.data.length > 0) {
-      return { lat: parseFloat(res.data[0].lat), lng: parseFloat(res.data[0].lon) };
-    }
-
-  } catch (error) {
-    console.error("❌ Geocoding Error:", error.message);
-  }
+  let query = queryParts.join(", ");
+  let attempts = 0;
   
-  console.log("❌ Location could not be found on map.");
+  while (attempts < 3) { // Try 3 times
+      try {
+        let url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&addressdetails=1&limit=1`;
+        let res = await axios.get(url, { headers: { "User-Agent": userAgent } });
+
+        if (res.data && res.data.length > 0) {
+          const result = res.data[0];
+          console.log("✅ Location found:", result.display_name);
+          return { lat: parseFloat(result.lat), lng: parseFloat(result.lon) };
+        }
+        return null; // Not found, don't retry
+
+      } catch (error) {
+        if (error.response && error.response.status === 429) {
+            console.warn(`⏳ Geocoding rate limit hit. Retrying in 1s... (Attempt ${attempts + 1})`);
+            await sleep(1500); // Wait 1.5 seconds before retrying
+            attempts++;
+        } else {
+            console.error("❌ Geocoding API Error:", error.message);
+            return null;
+        }
+      }
+  }
   return null;
 }
 
@@ -62,26 +57,15 @@ const uploadImageFileToCloudinary = async (file) => {
     const public_id = genAssetId("img");
     return await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
-        {
-          public_id,
-          folder: "listings",
-          resource_type: "image",
-          overwrite: false,
-        },
+        { public_id, folder: "listings", resource_type: "image", overwrite: false },
         (error, result) => {
           if (error) return reject(error);
-          resolve({
-            url: result.secure_url,
-            public_id: result.public_id,
-            type: "image",
-          });
+          resolve({ url: result.secure_url, public_id: result.public_id, type: "image" });
         }
       );
       stream.end(file.buffer);
     });
-  } catch (err) {
-    throw err;
-  }
+  } catch (err) { throw err; }
 };
 
 async function uploadVideoFileToCloudinary(file) {
@@ -89,123 +73,38 @@ async function uploadVideoFileToCloudinary(file) {
     const public_id = genAssetId("vid");
     return await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
-        {
-          public_id,
-          folder: "listings",
-          resource_type: "video",
-          overwrite: false,
-        },
+        { public_id, folder: "listings", resource_type: "video", overwrite: false },
         async (error, result) => {
           if (error) return reject(error);
           if (result.duration && result.duration > 90) {
-            await cloudinary.uploader.destroy(result.public_id, {
-              resource_type: "video",
-            });
-            return reject(
-              new Error("Video too long. Max allowed is 90 seconds.")
-            );
+            await cloudinary.uploader.destroy(result.public_id, { resource_type: "video" });
+            return reject(new Error("Video too long. Max allowed is 90 seconds."));
           }
-          resolve({
-            url: result.secure_url,
-            public_id: result.public_id,
-            type: "video",
-          });
+          resolve({ url: result.secure_url, public_id: result.public_id, type: "video" });
         }
       );
       stream.end(file.buffer);
     });
-  } catch (err) {
-    throw err;
-  }
-}
-
-async function uploadVideoFromUrl(videoUrl) {
-  if (!videoUrl) return null;
-  try {
-    const public_id = genAssetId("vid");
-    const res = await cloudinary.uploader.upload(videoUrl, {
-      resource_type: "video",
-      public_id,
-      folder: "listings",
-      overwrite: false,
-    });
-    return { url: res.secure_url, public_id: res.public_id, type: "video" };
-  } catch (err) {
-    try {
-      const resp = await axios({
-        url: videoUrl,
-        method: "GET",
-        responseType: "stream",
-        timeout: 20000,
-      });
-      return await new Promise((resolve, reject) => {
-        const public_id2 = genAssetId("vid");
-        const uploadStream = cloudinary.uploader.upload_stream(
-          { public_id: public_id2, resource_type: "video", folder: "listings" },
-          (error, result) => {
-            if (error) return reject(error);
-            resolve({
-              url: result.secure_url,
-              public_id: result.public_id,
-              type: "video",
-            });
-          }
-        );
-        resp.data.pipe(uploadStream);
-      });
-    } catch (err2) {
-      throw err2;
-    }
-  }
+  } catch (err) { throw err; }
 }
 
 async function deleteCloudinaryAsset(public_id, type = "image") {
   if (!public_id) return;
   try {
-    await cloudinary.uploader.destroy(public_id, {
-      resource_type: type === "video" ? "video" : "image",
-    });
-  } catch (e) {
-    console.warn(
-      "⚠ Failed to delete Cloudinary asset:",
-      public_id,
-      e?.message || e
-    );
-  }
-}
-
-function normalizeFiles(req) {
-  if (!req.files) return [];
-  if (Array.isArray(req.files)) return req.files;
-  const arr = [];
-  Object.values(req.files).forEach((v) => {
-    if (Array.isArray(v)) arr.push(...v);
-    else if (v) arr.push(v);
-  });
-  return arr;
+    await cloudinary.uploader.destroy(public_id, { resource_type: type === "video" ? "video" : "image" });
+  } catch (e) { console.warn("⚠ Failed to delete Cloudinary asset:", public_id); }
 }
 
 function normalizeExistingPhotos(existing = []) {
   if (!existing) return [];
   if (!Array.isArray(existing)) {
-    try {
-      existing = JSON.parse(existing);
-    } catch {
-      return [];
-    }
+    try { existing = JSON.parse(existing); } catch { return []; }
   }
-  return existing
-    .map((p) => {
+  return existing.map((p) => {
       if (!p) return null;
-      if (typeof p === "string")
-        return { url: p, public_id: null, type: "image" };
-      return {
-        url: p.url || p.secure_url || null,
-        public_id: p.public_id || p.publicId || null,
-        type: p.type || "image",
-      };
-    })
-    .filter(Boolean);
+      if (typeof p === "string") return { url: p, public_id: null, type: "image" };
+      return { url: p.url || p.secure_url || null, public_id: p.public_id || p.publicId || null, type: p.type || "image" };
+    }).filter(Boolean);
 }
 
 /* -------------------------------------------------------
@@ -213,52 +112,21 @@ function normalizeExistingPhotos(existing = []) {
 ------------------------------------------------------- */
 export const createListing = async (req, res) => {
   try {
-    console.log("---- FILES IN REQUEST ----", req.files);
-    console.log("---- BODY IN REQUEST ----", req.body);
-
     const userId = req.user?.unique_id;
     if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
     // 🔹 Fetch agent email
-    const emailRes = await pool.query(
-      "SELECT email FROM profiles WHERE unique_id=$1",
-      [userId]
-    );
-    if (!emailRes.rows.length) {
-      return res.status(400).json({ message: "Agent profile not found" });
-    }
+    const emailRes = await pool.query("SELECT email FROM profiles WHERE unique_id=$1", [userId]);
+    if (!emailRes.rows.length) return res.status(400).json({ message: "Agent profile not found" });
     const agentEmail = emailRes.rows[0].email;
 
-    // 🔹 Extract body fields with camelCase fallback
     let {
-      product_id,
-      title,
-      description,
-      price,
-      price_currency,
-      price_period,
-      category,
-      property_type,
-      listing_type,
-      address,
-      city,
-      state,
-      country,
-      zip_code, // 👈 New: Zip Code
-      latitude, 
-      longitude, 
-      bedrooms,
-      bathrooms,
-      parking,
-      year_built,
-      square_footage,
-      furnishing,
-      lot_size,
-      features,
-      contact_name,
-      contact_email,
-      contact_phone,
-      contact_method,
+      product_id, title, description, price, price_currency, price_period,
+      category, property_type, listing_type,
+      address, city, state, country, zip_code, 
+      latitude, longitude, 
+      bedrooms, bathrooms, parking, year_built, square_footage, furnishing, lot_size,
+      features, contact_name, contact_email, contact_phone, contact_method,
     } = req.body;
 
     // CamelCase fallback
@@ -274,98 +142,63 @@ export const createListing = async (req, res) => {
     year_built = year_built || req.body.yearBuilt;
     square_footage = square_footage || req.body.squareFootage;
     lot_size = lot_size || req.body.lotSize;
-    zip_code = zip_code || req.body.zipCode; // 👈 Fallback for zipCode
+    zip_code = zip_code || req.body.zipCode;
 
     if (!product_id) product_id = generateProductId();
 
-    // 🔹 Parse features
+    let lat = latitude ? Number(latitude) : null;
+    let lng = longitude ? Number(longitude) : null;
+
+    // 🛑 STRICT GEOCODING WITH RETRY
+    if (!lat || !lng) {
+        if (address && city) {
+            const coords = await getCoordinates(address, city, state, country, zip_code);
+            if (!coords) {
+                return res.status(400).json({ 
+                    message: "Invalid Location: We could not verify this address on the map. Please adjust the map pin or check your address details." 
+                });
+            }
+            lat = coords.lat;
+            lng = coords.lng;
+        } else {
+             return res.status(400).json({ message: "Please provide a valid address or drop a pin on the map." });
+        }
+    }
+
     let featuresArr = [];
     try {
       if (features) {
-        featuresArr =
-          typeof features === "string" ? JSON.parse(features) : features;
+        featuresArr = typeof features === "string" ? JSON.parse(features) : features;
         if (!Array.isArray(featuresArr) && typeof featuresArr === "object") {
           featuresArr = Object.keys(featuresArr).filter((k) => featuresArr[k]);
         }
       }
-    } catch {
-      featuresArr = [];
-    }
+    } catch { featuresArr = []; }
 
-    // 🔹 Normalize existing photos
     let existingPhotos = [];
-    try {
-      existingPhotos = req.body.existingPhotos
-        ? normalizeExistingPhotos(req.body.existingPhotos)
-        : [];
-    } catch {
-      existingPhotos = [];
-    }
+    try { existingPhotos = req.body.existingPhotos ? normalizeExistingPhotos(req.body.existingPhotos) : []; } catch { existingPhotos = []; }
 
-    // 🔹 Upload new photos
     const uploadedPhotos = [];
     for (const file of req.files?.photos || []) {
       try {
-        const result = await uploadImageFileToCloudinary(file); // uses file.buffer
-        uploadedPhotos.push({
-          url: result.url, // already secure_url
-          public_id: result.public_id,
-          type: "image",
-        });
-      } catch (e) {
-        console.error("Photo upload failed:", file.originalname, e.message);
-      }
+        const result = await uploadImageFileToCloudinary(file);
+        uploadedPhotos.push({ url: result.url, public_id: result.public_id, type: "image" });
+      } catch (e) { console.error("Photo upload failed:", e.message); }
     }
 
     const allPhotos = [...existingPhotos, ...uploadedPhotos];
 
-    // 🔹 Upload video file
     let uploadedVideo = null;
-    if (req.files?.video_file?.length) {
-      try {
-        uploadedVideo = await uploadVideoFileToCloudinary(req.files.video_file[0]); // uses file.buffer
-      } catch (e) {
-        console.error("Video upload failed:", e.message);
-      }
-    }
+    if (req.files?.video_file?.length) { try { uploadedVideo = await uploadVideoFileToCloudinary(req.files.video_file[0]); } catch (e) {} }
     const finalVideoUrl = uploadedVideo?.url || null;
     const finalVideoPublicId = uploadedVideo?.public_id || null;
 
-    // 🔹 Upload virtual tour file
     let uploadedVirtual = null;
-    if (req.files?.virtual_file?.length) {
-      try {
-        uploadedVirtual = await uploadVideoFileToCloudinary(req.files.virtual_file[0]); // uses file.buffer
-      } catch (e) {
-        console.error("Virtual tour upload failed:", e.message);
-      }
-    }
+    if (req.files?.virtual_file?.length) { try { uploadedVirtual = await uploadVideoFileToCloudinary(req.files.virtual_file[0]); } catch (e) {} }
     const finalVirtualUrl = uploadedVirtual?.url || null;
     const finalVirtualPublicId = uploadedVirtual?.public_id || null;
 
-    // 🔹 Convert numeric fields
-    const normalizedPrice = price ? Number(price) : null;
-    const normalizedBedrooms = bedrooms ? Number(bedrooms) : null;
-    const normalizedBathrooms = bathrooms ? Number(bathrooms) : null;
-    const normalizedYearBuilt = year_built ? Number(year_built) : null;
-    const normalizedSquareFootage = square_footage ? Number(square_footage) : null;
-    const normalizedLotSize = lot_size ? Number(lot_size) : null;
-    
-    // 🔹 Convert Coordinates & Auto-Geocode if Missing
-    let lat = latitude ? Number(latitude) : null;
-    let lng = longitude ? Number(longitude) : null;
-
-    if ((!lat || !lng) && (address || city)) {
-        const coords = await getCoordinates(address, city, state, country, zip_code);
-        if (coords) {
-            lat = coords.lat;
-            lng = coords.lng;
-            console.log("📍 Auto-detected Coordinates:", lat, lng);
-        }
-    }
-
     // 🔹 Insert into DB
-    // 🛑 Note: We added zip_code as Param $36
     const query = `
       INSERT INTO listings (
         product_id, agent_unique_id, created_by, email,
@@ -378,212 +211,112 @@ export const createListing = async (req, res) => {
         virtual_tour_url, virtual_tour_public_id,
         contact_name, contact_email, contact_phone, contact_method,
         zip_code,
-        status, is_active, created_at, updated_at
+        status, is_active, payment_status, created_at, updated_at
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
         $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
         $32, $33, $34, $35, $36,
-        'pending', false, NOW(), NOW()
+        'pending', false, 'unpaid', NOW(), NOW()
       )
       RETURNING *;
     `;
 
     const params = [
-      product_id,
-      userId,
-      userId,
-      agentEmail,
-      title || null,
-      description || null,
-      normalizedPrice,
-      price_currency || "USD",
-      price_period || null,
-      category || null,
-      property_type || null,
-      listing_type || null,
-      address || null,
-      city || null,
-      state || null,
-      country || null,
-      lat, // 👈 Param 17 (Latitude)
-      lng, // 👈 Param 18 (Longitude)
-      normalizedBedrooms,
-      normalizedBathrooms,
-      parking || null,
-      normalizedYearBuilt, // 👈 Param 22 (Skipped in previous, fixed here)
-      normalizedSquareFootage,
-      furnishing || null,
-      normalizedLotSize,
-      JSON.stringify(featuresArr),
-      JSON.stringify(allPhotos),
-      finalVideoUrl,
-      finalVideoPublicId,
-      finalVirtualUrl,
-      finalVirtualPublicId,
-      contact_name || null,
-      contact_email || null,
-      contact_phone || null,
-      contact_method || null,
-      zip_code || null // 👈 Param 36
+      product_id, userId, userId, agentEmail,
+      title || null, description || null, 
+      price ? Number(price) : null, price_currency || "USD", price_period || null,
+      category || null, property_type || null, listing_type || null,
+      address || null, city || null, state || null, country || null, 
+      lat, lng, 
+      bedrooms ? Number(bedrooms) : null, bathrooms ? Number(bathrooms) : null, parking || null,
+      year_built ? Number(year_built) : null, square_footage ? Number(square_footage) : null, furnishing || null, lot_size ? Number(lot_size) : null,
+      JSON.stringify(featuresArr), JSON.stringify(allPhotos),
+      finalVideoUrl, finalVideoPublicId, finalVirtualUrl, finalVirtualPublicId,
+      contact_name || null, contact_email || null, contact_phone || null, contact_method || null,
+      zip_code || null
     ];
 
     const result = await pool.query(query, params);
     const listing = result.rows[0];
 
-    // Normalize photos for response
     try {
-      const parsed =
-        typeof listing.photos === "string"
-          ? JSON.parse(listing.photos)
-          : listing.photos || [];
+      const parsed = typeof listing.photos === "string" ? JSON.parse(listing.photos) : listing.photos || [];
+      listing.photos = parsed.map((p) => ({ url: p.url || p.secure_url || null, public_id: p.public_id || null, type: p.type || "image" }));
+    } catch { listing.photos = []; }
 
-      listing.photos = parsed.map((p) => ({
-        url: p.url || p.secure_url || null, 
-        public_id: p.public_id || null,
-        type: p.type || "image",
-      }));
-    } catch {
-      listing.photos = [];
-    }
-
-    // 🔹 Attach agent profile
-    const profileRes = await pool.query(
-      `SELECT unique_id, full_name, username, avatar_url, bio, agency_name, experience, country, city
-       FROM profiles WHERE unique_id=$1`,
-      [userId]
-    );
+    const profileRes = await pool.query(`SELECT unique_id, full_name, username, avatar_url, bio, agency_name, experience, country, city FROM profiles WHERE unique_id=$1`, [userId]);
     const profile = profileRes.rows[0];
 
     res.status(201).json({
       success: true,
       message: "Listing created ✅",
-      listing: {
-        ...listing,
-        photos: listing.photos,
-        agent: profile || null,
-      },
+      listing: { ...listing, photos: listing.photos, agent: profile || null },
     });
   } catch (err) {
     console.error("CreateListing Error:", err);
-    res.status(500).json({
-      message: "Server Error",
-      code: "CREATE_LISTING_FAIL",
-      details: err?.message,
-    });
+    res.status(500).json({ message: "Server Error", code: "CREATE_LISTING_FAIL", details: err?.message });
   }
 };
 
 
 /* -------------------------------------------------------
-   UPDATE LISTING (UPDATED with Geocoding & Zip Code)
+   UPDATE LISTING
+   ✅ FIXED: Forces status='pending' and is_active=false on every edit
 ------------------------------------------------------- */
 export const updateListing = async (req, res) => {
   try {
-    console.log("req.files:", req.files);
-    console.log("req.body:", req.body);
-
-    const product_id =
-      req.params.product_id || req.params.id || req.params.productId;
-
+    const product_id = req.params.product_id || req.params.id || req.params.productId;
     const userId = req.user?.unique_id;
     if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
     // Fetch agent email
-    const emailRes = await pool.query(
-      "SELECT email FROM profiles WHERE unique_id=$1",
-      [userId]
-    );
-    if (!emailRes.rows.length)
-      return res.status(400).json({ message: "Profile missing" });
+    const emailRes = await pool.query("SELECT email FROM profiles WHERE unique_id=$1", [userId]);
+    if (!emailRes.rows.length) return res.status(400).json({ message: "Profile missing" });
     const agentEmail = emailRes.rows[0].email;
 
     // Fetch existing listing
-    const found = await pool.query(
-      "SELECT * FROM listings WHERE product_id=$1",
-      [product_id]
-    );
+    const found = await pool.query("SELECT * FROM listings WHERE product_id=$1", [product_id]);
     const listing = found.rows[0];
     if (!listing) return res.status(404).json({ message: "Listing not found" });
-    if (listing.agent_unique_id !== userId)
-      return res.status(403).json({ message: "Forbidden" });
+    if (listing.agent_unique_id !== userId) return res.status(403).json({ message: "Forbidden" });
 
     /* -----------------------------
        PHOTOS NORMALIZATION
     ----------------------------- */
     let photos = [];
     try {
-      const parsed =
-        typeof listing.photos === "string"
-          ? JSON.parse(listing.photos)
-          : listing.photos || [];
-      photos = parsed.map((p) => ({
-        url: p.url || p.secure_url || null,
-        public_id: p.public_id || null,
-        type: p.type || "image",
-      }));
-    } catch {
-      photos = [];
-    }
+        const parsed = typeof listing.photos === "string" ? JSON.parse(listing.photos) : listing.photos || [];
+        photos = parsed.map((p) => ({ url: p.url || p.secure_url || null, public_id: p.public_id || null, type: p.type || "image" }));
+    } catch { photos = []; }
 
     // Remove selected photos
     let removeList = [];
-    try {
-      if (req.body.removePhotos) {
-        removeList =
-          typeof req.body.removePhotos === "string"
-            ? JSON.parse(req.body.removePhotos)
-            : req.body.removePhotos;
-      }
-    } catch {
-      removeList = [];
-    }
-
+    try { if (req.body.removePhotos) removeList = typeof req.body.removePhotos === "string" ? JSON.parse(req.body.removePhotos) : req.body.removePhotos; } catch { removeList = []; }
     if (Array.isArray(removeList) && removeList.length) {
-      await Promise.all(
-        removeList.map(async (pid) => {
-          const asset = photos.find((x) => x.public_id === pid);
-          const type = asset?.type || "image";
-          await deleteCloudinaryAsset(pid, type);
-        })
-      );
-      photos = photos.filter((p) => !removeList.includes(p.public_id));
+        await Promise.all(removeList.map(async (pid) => {
+            const asset = photos.find((x) => x.public_id === pid);
+            await deleteCloudinaryAsset(pid, asset?.type || "image");
+        }));
+        photos = photos.filter((p) => !removeList.includes(p.public_id));
     }
 
     // Merge existingPhotos from form to keep order
     let frontPhotos = [];
-    try {
-      if (req.body.existingPhotos) {
-        frontPhotos = normalizeExistingPhotos(req.body.existingPhotos);
-      }
-    } catch {
-      frontPhotos = [];
-    }
-
+    try { if (req.body.existingPhotos) frontPhotos = normalizeExistingPhotos(req.body.existingPhotos); } catch { frontPhotos = []; }
     const seen = new Set(photos.map((p) => p.public_id));
-    for (const p of frontPhotos) {
-      if (!seen.has(p.public_id)) {
-        photos.push(p);
-        seen.add(p.public_id);
-      }
-    }
+    for (const p of frontPhotos) { if (!seen.has(p.public_id)) { photos.push(p); seen.add(p.public_id); } }
 
     /* -----------------------------
        UPLOAD NEW PHOTOS
     ----------------------------- */
     const photoFiles = req.files?.photos || [];
     for (const file of photoFiles) {
-      try {
-        const up = await uploadImageFileToCloudinary(file);
-        photos.push({
-          url: up.url,
-          public_id: up.public_id,
-          type: "image",
-        });
-      } catch (e) {
-        console.error("Photo upload failed:", e?.message || e);
-      }
+        try {
+            const up = await uploadImageFileToCloudinary(file);
+            photos.push({ url: up.url, public_id: up.public_id, type: "image" });
+        } catch (e) { console.error("Photo upload failed:", e?.message); }
     }
 
     /* -----------------------------
@@ -591,56 +324,25 @@ export const updateListing = async (req, res) => {
     ----------------------------- */
     let featuresArr = [];
     try {
-      featuresArr = req.body.features
-        ? typeof req.body.features === "string"
-          ? JSON.parse(req.body.features)
-          : req.body.features
-        : JSON.parse(listing.features || "[]");
-
-      if (!Array.isArray(featuresArr)) {
-        featuresArr = Object.keys(featuresArr).filter((k) => featuresArr[k]);
-      }
-    } catch {
-      featuresArr =
-        typeof listing.features === "string"
-          ? JSON.parse(listing.features)
-          : listing.features || [];
-    }
+        featuresArr = req.body.features ? (typeof req.body.features === "string" ? JSON.parse(req.body.features) : req.body.features) : JSON.parse(listing.features || "[]");
+        if (!Array.isArray(featuresArr)) featuresArr = Object.keys(featuresArr).filter((k) => featuresArr[k]);
+    } catch { featuresArr = []; }
 
     /* -----------------------------
        UPLOAD VIDEO + VIRTUAL TOUR
     ----------------------------- */
     let uploadedVideo = null;
     if (req.files?.video_file?.[0]) {
-      try {
-        const up = await uploadVideoFileToCloudinary(req.files.video_file[0]);
-        uploadedVideo = {
-          url: up.url,
-          public_id: up.public_id,
-          type: "video",
-        };
-      } catch {}
+        try { const up = await uploadVideoFileToCloudinary(req.files.video_file[0]); uploadedVideo = { url: up.url, public_id: up.public_id, type: "video" }; } catch {}
     }
-
     let uploadedVirtual = null;
     if (req.files?.virtual_file?.[0]) {
-      try {
-        const up = await uploadVideoFileToCloudinary(req.files.virtual_file[0]);
-        uploadedVirtual = {
-          url: up.url,
-          public_id: up.public_id,
-          type: "virtualTour",
-        };
-      } catch {}
+        try { const up = await uploadVideoFileToCloudinary(req.files.virtual_file[0]); uploadedVirtual = { url: up.url, public_id: up.public_id, type: "virtualTour" }; } catch {}
     }
-
     const finalVideoUrl = uploadedVideo?.url || listing.video_url;
-    const finalVideoPublicId =
-      uploadedVideo?.public_id || listing.video_public_id;
-
+    const finalVideoPublicId = uploadedVideo?.public_id || listing.video_public_id;
     const finalVirtualUrl = uploadedVirtual?.url || listing.virtual_tour_url;
-    const finalVirtualPublicId =
-      uploadedVirtual?.public_id || listing.virtual_tour_public_id;
+    const finalVirtualPublicId = uploadedVirtual?.public_id || listing.virtual_tour_public_id;
 
     /* -----------------------------
        NUMERIC + BODY NORMALIZATION
@@ -653,7 +355,7 @@ export const updateListing = async (req, res) => {
     const newCity = b.city ?? listing.city;
     const newState = b.state ?? listing.state;
     const newCountry = b.country ?? listing.country;
-    const newZip = b.zip_code || b.zipCode || listing.zip_code; // Handle zip_code
+    const newZip = b.zip_code || b.zipCode || listing.zip_code;
 
     // 2. Handle Coordinates (Keep existing if not provided)
     let newLat = b.latitude !== undefined && b.latitude !== "" ? Number(b.latitude) : Number(listing.latitude);
@@ -667,10 +369,19 @@ export const updateListing = async (req, res) => {
         (b.country && b.country !== listing.country) ||
         ((b.zip_code || b.zipCode) && (b.zip_code || b.zipCode) !== listing.zip_code);
 
-    if (addressChanged && (!b.latitude || !b.longitude)) {
-        console.log("📍 Address changed, recalculating coordinates...");
-        const coords = await getCoordinates(newAddr, newCity, newState, newCountry, newZip);
-        if (coords) {
+    if (addressChanged) {
+        const manualCoordsProvided = b.latitude && b.longitude;
+        if (!manualCoordsProvided) {
+            console.log("📍 Address changed, recalculating coordinates...");
+            const coords = await getCoordinates(newAddr, newCity, newState, newCountry, newZip);
+            
+            if (!coords) {
+                // ❌ Return Error to Frontend immediately
+                return res.status(400).json({ 
+                    message: "Invalid Location Update: We could not find this new address on the map. Please ensure the address details are correct." 
+                });
+            }
+            
             newLat = coords.lat;
             newLng = coords.lng;
             console.log("✅ New Coords:", newLat, newLng);
@@ -686,10 +397,10 @@ export const updateListing = async (req, res) => {
       b.category ?? listing.category,
       b.property_type || b.propertyType || listing.property_type,
       b.listing_type || b.listingType || listing.listing_type,
-      newAddr, // Updated Address
-      newCity, // Updated City
-      newState, // Updated State
-      newCountry, // Updated Country
+      newAddr, 
+      newCity, 
+      newState, 
+      newCountry, 
       toNum(b.bedrooms, listing.bedrooms),
       toNum(b.bathrooms, listing.bathrooms),
       b.parking ?? listing.parking,
@@ -708,12 +419,13 @@ export const updateListing = async (req, res) => {
       b.contact_phone || b.contactPhone || listing.contact_phone,
       b.contact_method || b.contactMethod || listing.contact_method,
       agentEmail,
-      newLat, // 👈 Updated Latitude
-      newLng, // 👈 Updated Longitude
-      newZip, // 👈 NEW: Zip Code (Param 33)
-      product_id, // 👈 WHERE clause (Param 34)
+      newLat, 
+      newLng, 
+      newZip, 
+      product_id 
     ];
 
+    // ✅ CRITICAL FIX: FORCING STATUS RESET IN SQL
     const q = `
       UPDATE listings SET
         title=$1, description=$2, price=$3, price_currency=$4, price_period=$5,
@@ -727,6 +439,8 @@ export const updateListing = async (req, res) => {
         contact_name=$26, contact_email=$27, contact_phone=$28, contact_method=$29,
         email=$30,
         latitude=$31, longitude=$32, zip_code=$33,
+        status='pending',   -- 👈 FORCED RESET
+        is_active=false,    -- 👈 FORCED RESET
         updated_at=NOW()
       WHERE product_id=$34
       RETURNING *;
@@ -737,43 +451,25 @@ export const updateListing = async (req, res) => {
 
     // Final photo normalization
     try {
-      const parsed =
-        typeof out.photos === "string"
-          ? JSON.parse(out.photos)
-          : out.photos || [];
-      out.photos = parsed.map((p) => ({
-        url: p.url || p.secure_url || null,
-        public_id: p.public_id || null,
-        type: p.type || "image",
-      }));
-    } catch {
-      out.photos = [];
-    }
+      const parsed = typeof out.photos === "string" ? JSON.parse(out.photos) : out.photos || [];
+      out.photos = parsed.map((p) => ({ url: p.url || p.secure_url || null, public_id: p.public_id || null, type: p.type || "image" }));
+    } catch { out.photos = []; }
 
     // Attach agent profile
     const profileRes = await pool.query(
       `SELECT unique_id, full_name, username, avatar_url, bio, agency_name,
-              experience, country, city
+              experience, country, city 
        FROM profiles WHERE unique_id=$1`,
       [userId]
     );
     out.agent = profileRes.rows[0] || null;
 
-    return res.json({
-      success: true,
-      message: "Listing updated ✅",
-      listing: out,
-    });
+    return res.json({ success: true, message: "Listing updated & submitted for review ✅", listing: out });
   } catch (err) {
     console.error("UpdateListing Error:", err);
-    res.status(500).json({
-      message: "Server Error",
-      code: "UPDATE_LISTING_FAIL",
-      details: err?.message,
-    });
+    res.status(500).json({ message: "Server Error", code: "UPDATE_LISTING_FAIL", details: err?.message });
   }
 };
-
 
 /* -------------------------------------------------------
    DELETE LISTING
@@ -867,6 +563,8 @@ export const deleteListing = async (req, res) => {
     });
   }
 };
+
+
 
 /* -------------------------------------------------------
    1. GET LISTINGS (Public - /buy, /rent, Homepage)
@@ -1002,7 +700,8 @@ export const getAgentListings = async (req, res) => {
     const query = `
       SELECT l.*, 
              p.full_name, p.username, p.avatar_url, p.bio, 
-             p.agency_name, p.experience, p.country as agent_country, p.city as agent_city
+             p.agency_name, p.experience, p.country as agent_country, p.city as agent_city,
+             p.role as agent_role  -- 👈 ADDED THIS
       FROM listings l
       LEFT JOIN profiles p ON l.agent_unique_id = p.unique_id
       WHERE l.agent_unique_id=$1
@@ -1020,9 +719,10 @@ export const getAgentListings = async (req, res) => {
       return {
         ...r,
         photos,
-        // ✅ Ensure coordinates are numbers for the Frontend Map
         latitude: r.latitude ? parseFloat(r.latitude) : null,
         longitude: r.longitude ? parseFloat(r.longitude) : null,
+        agent_role: r.agent_role, // 👈 Explicitly pass top-level
+        role: r.agent_role,       // 👈 Explicitly pass top-level for safety
         agent: {
           unique_id: r.agent_unique_id,
           full_name: r.full_name,
@@ -1033,6 +733,7 @@ export const getAgentListings = async (req, res) => {
           experience: r.experience,
           country: r.agent_country,
           city: r.agent_city,
+          role: r.agent_role, // 👈 Included inside agent object
         },
       };
     });
@@ -1111,8 +812,8 @@ export const getListingByProductId = async (req, res) => {
 
 
 /* -------------------------------------------------------
-   UPDATE LISTING STATUS (admin)
-   Admin approves → listing stays inactive until agent pays
+   UPDATE LISTING STATUS (Admin)
+   Fixed: Checks payment_status to avoid double charging
 ------------------------------------------------------- */
 export const updateListingStatus = async (req, res) => {
   try {
@@ -1129,13 +830,20 @@ export const updateListingStatus = async (req, res) => {
     );
 
     const listing = existing.rows[0];
-    if (!listing) {
-      return res.status(404).json({ message: "Listing not found" });
-    }
+    if (!listing) return res.status(404).json({ message: "Listing not found" });
 
     const agentId = listing.agent_unique_id;
 
-    const isActiveValue = status === "approved" ? false : listing.is_active;
+    // ✅ FIX: Logic to prevent double-paying
+    let isActiveValue = listing.is_active; // Default to current state
+
+    if (status === "approved") {
+        // If already paid, Go LIVE immediately. If not paid, stay inactive.
+        isActiveValue = listing.payment_status === 'paid' ? true : false;
+    } else if (status === "rejected" || status === "pending") {
+        // If rejected/pending, always turn off visibility
+        isActiveValue = false;
+    }
 
     const updateQuery = `
       UPDATE listings 
@@ -1146,40 +854,32 @@ export const updateListingStatus = async (req, res) => {
       RETURNING *;
     `;
 
-    const result = await pool.query(updateQuery, [
-      status,
-      isActiveValue,
-      product_id,
-    ]);
-
+    const result = await pool.query(updateQuery, [status, isActiveValue, product_id]);
     const updatedListing = result.rows[0];
 
-    // Correct notification
+    // Notification Logic
+    let notifyMsg = `Your listing was ${status}.`;
+    if (status === "approved") {
+        notifyMsg += updatedListing.is_active 
+            ? " It is now LIVE on the platform." 
+            : " Please proceed to payment to activate it.";
+    }
+
     await pool.query(
-      `
-      INSERT INTO notifications (receiver_id, product_id, type, title, message)
-      VALUES ($1, $2, 'listing_status', 'Listing Status Update', $3)
-      `,
-      [
-        agentId,
-        product_id,
-        `Your listing was ${status}. ${
-          status === "approved" ? "Please proceed to payment." : ""
-        }`,
-      ]
+      `INSERT INTO notifications (receiver_id, product_id, type, title, message)
+       VALUES ($1, $2, 'listing_status', 'Listing Status Update', $3)`,
+      [agentId, product_id, notifyMsg]
     );
 
-    // Socket
-    req.io.to(agentId).emit("listingStatusUpdated", {
-      product_id,
-      status,
-    });
+    if(req.io) {
+        req.io.to(agentId).emit("listingStatusUpdated", {
+            product_id,
+            status,
+            is_active: isActiveValue
+        });
+    }
 
-    res.json({
-      success: true,
-      message: "Listing status updated",
-      listing: updatedListing,
-    });
+    res.json({ success: true, message: "Listing status updated", listing: updatedListing });
   } catch (err) {
     console.error("UpdateListingStatus Error:", err);
     res.status(500).json({ message: "Failed to update listing status" });
@@ -1216,7 +916,6 @@ RETURNING *;
 
 /* -------------------------------------------------------
    GET ALL LISTINGS (ADMIN ONLY)
-   Returns Pending, Rejected, Unpaid, Active... everything.
 ------------------------------------------------------- */
 export const getAllListingsAdmin = async (req, res) => {
   try {
@@ -1224,11 +923,12 @@ export const getAllListingsAdmin = async (req, res) => {
       SELECT 
         l.*,
         p.full_name, p.username, p.email AS agent_email, p.phone, p.avatar_url, p.agency_name,
-        p.city AS agent_city, p.country AS agent_country
+        p.city AS agent_city, p.country AS agent_country,
+        p.role as agent_role -- 👈 ADDED THIS
       FROM listings l
       LEFT JOIN profiles p ON l.agent_unique_id = p.unique_id
       ORDER BY 
-        CASE WHEN l.status = 'pending' THEN 1 ELSE 2 END, -- Show Pending first!
+        CASE WHEN l.status = 'pending' THEN 1 ELSE 2 END,
         l.created_at DESC;
     `;
 
@@ -1246,6 +946,8 @@ export const getAllListingsAdmin = async (req, res) => {
         photos,
         latitude: r.latitude ? parseFloat(r.latitude) : null,
         longitude: r.longitude ? parseFloat(r.longitude) : null,
+        role: r.agent_role,       // 👈 Explicitly pass top-level
+        agent_role: r.agent_role, // 👈 Explicitly pass top-level
         agent: {
           unique_id: r.agent_unique_id,
           full_name: r.full_name,
@@ -1255,7 +957,8 @@ export const getAllListingsAdmin = async (req, res) => {
           phone: r.phone,
           agency_name: r.agency_name,
           city: r.agent_city,
-          country: r.agent_country
+          country: r.agent_country,
+          role: r.agent_role // 👈 Included
         }
       };
     });
@@ -1265,50 +968,72 @@ export const getAllListingsAdmin = async (req, res) => {
     console.error("[GetAllListingsAdmin] Error:", err);
     res.status(500).json({ message: "Failed to fetch admin listings" });
   }
-};
+}; 
 
 
 /* -------------------------------------------------------
-   GET PUBLIC AGENT PROFILE + LISTINGS
-   GET /api/public/agent/:unique_id
+   GET PUBLIC AGENT PROFILE
+   ✅ FIXED: Changed 'status' to 'verification_status'
+   ✅ FIXED: Removed 'country_code' (Auto-generated instead)
 ------------------------------------------------------- */
 export const getPublicAgentProfile = async (req, res) => {
   try {
-    const { unique_id } = req.params;
+    let { unique_id } = req.params; 
+    let queryCondition = "";
+    let queryValue = unique_id;
 
-    // 1. Fetch Profile Details
+    const isUUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(unique_id);
+
+    if (isUUID) {
+        queryCondition = "unique_id = $1";
+    } else {
+        if (queryValue.startsWith('@')) queryValue = queryValue.substring(1);
+        queryCondition = "(username ILIKE $1 OR full_name ILIKE $1)";
+    }
+
+    // ✅ FIXED QUERY: 
+    // 1. Removed 'country_code' (prevents error)
+    // 2. Changed 'status' -> 'verification_status AS status' (Fixes your current error)
     const profileQ = await pool.query(
       `SELECT unique_id, full_name, username, avatar_url, bio, 
               agency_name, experience, country, city, 
-              email, phone, social_instagram, social_twitter, social_linkedin
+              email, phone, social_instagram, social_twitter, social_linkedin,
+              role, 
+              verification_status AS status, -- 👈 ALIASING THIS FOR FRONTEND COMPATIBILITY
+              created_at
        FROM profiles 
-       WHERE unique_id = $1`,
-      [unique_id]
+       WHERE ${queryCondition}`,
+      [queryValue]
     );
 
-    if (profileQ.rows.length === 0) {
-      return res.status(404).json({ message: "Agent not found" });
-    }
+    if (profileQ.rows.length === 0) return res.status(404).json({ message: "Profile not found" });
+    
     const agent = profileQ.rows[0];
 
-    // 2. Fetch Agent's Active Listings
+    // ✅ MANUALLY GENERATE COUNTRY CODE (for Flag Emoji)
+    const countryMap = {
+        "Nigeria": "NG",
+        "United States": "US",
+        "United Kingdom": "GB",
+        "Canada": "CA",
+        "Ghana": "GH",
+        "South Africa": "ZA"
+    };
+    agent.country_code = countryMap[agent.country] || "NG"; 
+
+    // Fetch Listings
     const listingsQ = await pool.query(
       `SELECT * FROM listings 
-       WHERE agent_unique_id = $1 
-       AND status = 'approved' 
-       AND is_active = true
+       WHERE agent_unique_id = $1 AND status = 'approved' AND is_active = true
        ORDER BY created_at DESC`,
-      [unique_id]
+      [agent.unique_id]
     );
 
     // Normalize photos
     const listings = listingsQ.rows.map(l => {
       let photos = [];
-      try {
-        photos = typeof l.photos === "string" ? JSON.parse(l.photos) : l.photos || [];
-        photos = photos.map(p => ({ url: p.url || p, type: 'image' }));
-      } catch {}
-      return { ...l, photos };
+      try { photos = typeof l.photos === "string" ? JSON.parse(l.photos) : l.photos || []; } catch {}
+      return { ...l, photos: photos.map(p => ({ url: p.url || p, type: 'image' })) };
     });
 
     res.json({ agent, listings });
@@ -1318,8 +1043,6 @@ export const getPublicAgentProfile = async (req, res) => {
     res.status(500).json({ message: "Server Error" });
   }
 };
-
-
 
 /* -------------------------------------------------------
    SINGLE AI ANALYSIS
@@ -1348,32 +1071,26 @@ export const analyzeListing = async (req, res) => {
 };
 
 /* -------------------------------------------------------
-   BATCH AI ANALYSIS (Strict Mode)
-   
-
-[Image of Batch Processing Diagram]
-
+   ✅ BATCH AI ANALYSIS (Scalable Chunking)
+   Prevents crashing by processing in small chunks
 ------------------------------------------------------- */
 export const batchAnalyzeListings = async (req, res) => {
   try {
-    console.log("🚀 Starting Strict Batch Analysis...");
+    console.log("🚀 Starting Batch Analysis...");
 
-    // 1. Get ALL Pending Listings
     const pendingListings = await pool.query(
       `SELECT product_id, agent_unique_id, title FROM listings WHERE status = 'pending'`
     );
 
     const total = pendingListings.rows.length;
-    if (total === 0) return res.json({ message: "No pending listings." });
+    if (total === 0) return res.json({ message: "No pending listings.", stats: { approved: 0, rejected: 0, failed: 0 } });
 
     const results = { approved: 0, rejected: 0, failed: 0 };
-    
-    // 2. Process in CHUNKS
-    const CHUNK_SIZE = 5; 
-    const items = pendingListings.rows;
+    const allPending = pendingListings.rows;
+    const CHUNK_SIZE = 5; // Process 5 at a time to prevent DB/AI crash
 
-    for (let i = 0; i < total; i += CHUNK_SIZE) {
-        const chunk = items.slice(i, i + CHUNK_SIZE);
+    for (let i = 0; i < allPending.length; i += CHUNK_SIZE) {
+        const chunk = allPending.slice(i, i + CHUNK_SIZE);
         
         await Promise.all(chunk.map(async (listing) => {
             try {
@@ -1382,35 +1099,37 @@ export const batchAnalyzeListings = async (req, res) => {
                 let newStatus = 'pending';
                 let notificationTitle = "";
                 let notificationMsg = "";
-                let adminNote = ""; 
+                let adminNote = report.flags.join(". ");
 
                 if (report.verdict === 'Safe to Approve') {
                     newStatus = 'approved';
                     results.approved++;
                     notificationTitle = "Listing Approved";
-                    notificationMsg = `Congratulations! Your listing "${listing.title}" passed AI verification and is now approved.`;
+                    notificationMsg = `Your listing "${listing.title}" passed AI verification.`;
                     adminNote = "Verified by AI.";
-                } else {
+                } else if (report.verdict === 'Rejected') {
                     newStatus = 'rejected';
                     results.rejected++;
-                    const reasons = report.flags.length > 0 ? report.flags.join(". ") : "General quality standards not met.";
                     notificationTitle = "Listing Rejected";
-                    notificationMsg = `Your listing "${listing.title}" was rejected. Issue: ${reasons}`;
-                    adminNote = reasons;
+                    notificationMsg = `Your listing "${listing.title}" was rejected. Issues: ${adminNote}`;
+                } else {
+                    // Manual Review Needed
+                    await pool.query(
+                        `UPDATE listings SET admin_notes = $1 WHERE product_id = $2`,
+                        [`AI Flag: ${adminNote}`, listing.product_id]
+                    );
+                    return; 
                 }
 
-                // 3. Update Database
+                // Update Status
                 await pool.query(
-                    `UPDATE listings 
-                     SET status = $1, admin_notes = $2, updated_at = NOW() 
-                     WHERE product_id = $3`,
+                    `UPDATE listings SET status = $1, admin_notes = $2, updated_at = NOW() WHERE product_id = $3`,
                     [newStatus, adminNote, listing.product_id]
                 );
 
-                // 4. Notify Agent (✅ FIXED ARRAY COUNT)
+                // Notify Agent
                 await pool.query(
-                    `INSERT INTO notifications (receiver_id, product_id, type, title, message)
-                     VALUES ($1, $2, 'listing_status', $3, $4)`,
+                    `INSERT INTO notifications (receiver_id, product_id, type, title, message) VALUES ($1, $2, 'listing_status', $3, $4)`,
                     [listing.agent_unique_id, listing.product_id, notificationTitle, notificationMsg]
                 );
 
@@ -1436,6 +1155,6 @@ export const batchAnalyzeListings = async (req, res) => {
 
   } catch (err) {
     console.error("Batch Error:", err);
-    res.status(500).json({ message: "Server Error" });
+    res.status(500).json({ message: "Server Error", error: err.message });
   }
 };

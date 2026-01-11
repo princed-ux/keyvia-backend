@@ -1,58 +1,74 @@
 import { pool } from "../db.js";
 import { analyzeProfile } from "../services/aiProfileService.js";
 
-// ---------------------------------------------------------
-// 1. GET PENDING PROFILES
-// ---------------------------------------------------------
+// =========================================================
+// 1. GET PENDING VERIFICATIONS (The Queue)
+// =========================================================
 export const getPendingProfiles = async (req, res) => {
   try {
+    // Fetches profiles waiting for verification (Agent Licenses or Owner IDs)
     const result = await pool.query(`
       SELECT 
-        p.unique_id, p.full_name, p.username, p.email, p.avatar_url, 
-        p.country, p.city, p.phone, p.role, 
-        p.license_number, p.agency_name, p.bio, p.created_at, p.experience, p.special_id,
-        0 as review_count  -- ✅ FIXED: Returns 0 instead of crashing on missing 'reviews' table
+        p.unique_id, 
+        p.full_name, 
+        p.username, 
+        p.email, 
+        p.avatar_url, 
+        p.country, 
+        p.city, 
+        p.phone, 
+        p.role, 
+        -- ✅ Critical Fields for Verification
+        p.license_number, 
+        p.agency_name, 
+        p.experience,
+        p.special_id,
+        p.bio, 
+        p.created_at, 
+        p.verification_status,
+        -- ✅ Fallback for review count if table doesn't exist yet
+        0 as review_count
       FROM profiles p
-      WHERE p.verification_status = 'pending'
-      ORDER BY p.updated_at ASC
+      WHERE p.verification_status IN ('pending', 'new') 
+      ORDER BY p.created_at DESC
     `);
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
+    console.error("[GetPending] Error:", err);
     res.status(500).json({ message: "Server Error" });
   }
 };
 
-// ---------------------------------------------------------
-// 2. ANALYZE SINGLE PROFILE (On Demand)
-// ---------------------------------------------------------
+// =========================================================
+// 2. ANALYZE SINGLE PROFILE (AI Scan)
+// =========================================================
 export const analyzeAgentProfile = async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Fetch profile
+    // Fetch profile data
     const result = await pool.query(`SELECT * FROM profiles WHERE unique_id = $1`, [id]);
     if (result.rows.length === 0) return res.status(404).json({ message: "Profile not found" });
 
     const profile = result.rows[0];
     
-    // Run AI
+    // 🧠 Run AI Service
     const report = await analyzeProfile(profile);
     
     res.json(report);
   } catch (err) {
-    console.error(err);
+    console.error("[AI Analyze] Error:", err);
     res.status(500).json({ message: "Analysis Failed" });
   }
 };
 
-// ---------------------------------------------------------
-// 3. 🚀 BULK ANALYZE (The "Scan All" Button)
-// ---------------------------------------------------------
+// =========================================================
+// 3. 🚀 BULK AI SCAN (Auto-Pilot)
+// =========================================================
 export const analyzeAllPendingProfiles = async (req, res) => {
   try {
     // 1. Get all pending profiles
-    const pendingRes = await pool.query("SELECT * FROM profiles WHERE verification_status = 'pending'");
+    const pendingRes = await pool.query("SELECT * FROM profiles WHERE verification_status IN ('pending', 'new')");
     const profiles = pendingRes.rows;
 
     let approved = 0;
@@ -63,35 +79,53 @@ export const analyzeAllPendingProfiles = async (req, res) => {
     for (const profile of profiles) {
         const aiReport = await analyzeProfile(profile);
         
-        let newStatus = 'pending'; // Default: No change
+        let newStatus = 'pending'; 
         let reason = null;
 
-        // 🧠 AI DECISION LOGIC
+        // 🧠 AI Rules
         if (aiReport.score < 50 || aiReport.verdict === 'Auto-Reject') {
             newStatus = 'rejected';
             reason = `AI Auto-Reject: ${aiReport.flags.join(", ") || "Low Quality Data"}`;
             rejected++;
-        } else if (aiReport.score >= 85) {
+        } else if (aiReport.score >= 90) {
+            // Only auto-approve High Confidence
             newStatus = 'approved';
             approved++;
         } else {
             manual++;
         }
 
-        // 3. Update Database
-        await pool.query(
-            `UPDATE profiles SET 
-             verification_status=$1, 
-             rejection_reason=$2, 
-             ai_score=$3, 
-             ai_flags=$4,
-             updated_at=NOW()
-             WHERE unique_id=$5`,
-            [newStatus, reason, aiReport.score, aiReport.flags.join(", "), profile.unique_id]
-        );
-
-        // 4. Send Notification (Only if status changed)
+        // 3. If Status Changed, Update DB
         if (newStatus !== 'pending') {
+            // We reuse the update logic (simulated here for bulk speed)
+            await pool.query(
+                `UPDATE profiles SET 
+                 verification_status=$1, 
+                 rejection_reason=$2, 
+                 ai_score=$3, 
+                 ai_flags=$4,
+                 updated_at=NOW()
+                 WHERE unique_id=$5`,
+                [newStatus, reason, aiReport.score, aiReport.flags.join(", "), profile.unique_id]
+            );
+
+            // If Approved, we MUST update the User Table permissions
+            if (newStatus === 'approved') {
+                 // Determine Tier
+                 const tier = profile.license_number ? 'licensed' : 'identity';
+                 
+                 await pool.query(
+                    `UPDATE users 
+                     SET is_verified_agent = ($1 = 'agent'), 
+                         is_owner = ($1 = 'owner' OR $1 = 'landlord'),
+                         verification_tier = $2,
+                         is_verified = TRUE 
+                     WHERE unique_id = $3`,
+                    [profile.role, tier, profile.unique_id]
+                );
+            }
+
+            // Notification
             const msg = newStatus === 'approved' 
                 ? "Your profile has been verified! You can now post listings." 
                 : `Profile verification failed. Reason: ${reason}`;
@@ -112,40 +146,87 @@ export const analyzeAllPendingProfiles = async (req, res) => {
   }
 };
 
-// ---------------------------------------------------------
-// 4. MANUAL APPROVE/REJECT
-// ---------------------------------------------------------
+// =========================================================
+// 4. MANUAL APPROVE/REJECT (The Gatekeeper)
+// =========================================================
 export const updateProfileStatus = async (req, res) => {
+  const client = await pool.connect(); // Transaction Client
   try {
-    const { id } = req.params;
-    const { status, reason } = req.body; // status: 'approved' | 'rejected'
+    const { id } = req.params; // Profile ID
+    const { status, reason } = req.body; // 'approved' | 'rejected'
 
     if (!['approved', 'rejected'].includes(status)) {
         return res.status(400).json({ message: "Invalid status" });
     }
 
-    await pool.query(
-        `UPDATE profiles 
-         SET verification_status = $1, rejection_reason = $2, updated_at = NOW() 
-         WHERE unique_id = $3`,
-        [status, reason || null, id]
+    await client.query('BEGIN'); // Start Transaction
+
+    // 1. Update PROFILE status
+    const updateProfile = await client.query(
+      `UPDATE profiles 
+       SET verification_status = $1, rejection_reason = $2, updated_at = NOW() 
+       WHERE unique_id = $3 
+       RETURNING role, license_number, country`,
+      [status, reason || null, id]
     );
 
-    // Notify Agent
+    if (updateProfile.rows.length === 0) {
+        throw new Error("Profile not found");
+    }
+
+    const { role, license_number } = updateProfile.rows[0];
+
+    // 2. If Approved, Grant Permissions in USER Table
+    if (status === 'approved') {
+        let tier = 'none';
+        
+        // Strict Tier Logic
+        if (role === 'agent') {
+            tier = license_number ? 'licensed' : 'identity'; 
+        } else if (role === 'owner' || role === 'landlord') {
+            tier = 'identity'; // Owners get Identity tier
+        }
+
+        await client.query(
+            `UPDATE users 
+             SET is_verified_agent = ($1 = 'agent'), 
+                 is_owner = ($1 = 'owner' OR $1 = 'landlord'),
+                 verification_tier = $2,
+                 is_verified = TRUE 
+             WHERE unique_id = $3`,
+            [role, tier, id]
+        );
+    } else if (status === 'rejected') {
+        // Revoke Permissions
+        await client.query(
+            `UPDATE users 
+             SET is_verified_agent = FALSE, 
+                 verification_tier = 'none',
+                 is_verified = FALSE 
+             WHERE unique_id = $1`,
+            [id]
+        );
+    }
+
+    // 3. Send Notification
     const msg = status === 'approved' 
-        ? "Your profile has been verified! You can now post listings." 
-        : `Profile verification failed. Reason: ${reason}`;
+        ? `Congratulations! Your ${role} account is verified. You can now post listings.` 
+        : `Verification Rejected: ${reason}`;
 
-    await pool.query(
-        `INSERT INTO notifications (receiver_id, type, title, message)
-         VALUES ($1, 'system', 'Verification Update', $2)`,
-        [id, msg]
+    await client.query(
+      `INSERT INTO notifications (receiver_id, type, title, message)
+       VALUES ($1, 'system', 'Verification Update', $2)`,
+      [id, msg]
     );
 
-    res.json({ message: `Profile ${status}` });
+    await client.query('COMMIT'); // Commit Transaction
+    res.json({ success: true, message: `Profile ${status}` });
 
   } catch (err) {
-    console.error(err);
+    await client.query('ROLLBACK'); // Revert on Error
+    console.error("Verification Update Error:", err);
     res.status(500).json({ message: "Update Failed" });
+  } finally {
+    client.release();
   }
 };

@@ -1,5 +1,4 @@
 import { pool } from "../db.js";
-import cloudinary from "../utils/cloudinary.js"; // Ensure this path is correct
 
 // ------------------ VALIDATION HELPER ------------------
 const validateProfile = (data) => {
@@ -12,30 +11,56 @@ const validateProfile = (data) => {
 // ------------------ 1. GET PRIVATE PROFILE ------------------
 export const getProfile = async (req, res) => {
   try {
-    const { unique_id, source } = req.user;
+    const { unique_id, source, role } = req.user;
 
+    // ✅ KEY FIX: Use COALESCE to fallback to the 'users' table 
+    // if 'profiles' table data (like country/phone) is missing/null.
     const columns = `
-      unique_id, full_name, username, email, phone, gender, country, city, bio, avatar_url,
-      social_tiktok, social_instagram, social_facebook, social_linkedin, social_twitter,
-      role, special_id, created_at,
-      verification_status, rejection_reason,
-      agency_name, license_number, experience
+      p.unique_id, 
+      COALESCE(p.full_name, u.name) as full_name, 
+      p.username, 
+      COALESCE(p.email, u.email) as email, 
+      COALESCE(p.phone, u.phone) as phone, 
+      p.gender, 
+      COALESCE(p.country, u.country) as country, 
+      p.city, 
+      p.bio, 
+      COALESCE(p.avatar_url, u.avatar_url) as avatar_url,
+      p.social_tiktok, p.social_instagram, p.social_facebook, p.social_linkedin, p.social_twitter,
+      p.role, p.special_id, p.created_at,
+      p.verification_status, p.rejection_reason,
+      p.agency_name, p.license_number, p.experience,
+      p.preferred_location, p.budget_min, p.budget_max, p.property_type, p.move_in_date
     `;
 
+    // LEFT JOIN ensures we get data even if the profile row is partial
     let result = await pool.query(
-      `SELECT ${columns} FROM profiles WHERE unique_id = $1`,
+      `SELECT ${columns} 
+       FROM profiles p
+       RIGHT JOIN users u ON p.unique_id = u.unique_id
+       WHERE p.unique_id = $1`,
       [unique_id]
     );
 
-    // ✅ LOGIC: New User gets 'new' status
+    // ✅ SELF-HEALING: If profile row is totally missing, create it now
+    // using the country/phone data we already have in 'users'
     if (!result.rows.length && source === "users") {
+      const needsVerification = ['agent', 'owner'].includes(role);
+      const initialStatus = needsVerification ? 'new' : 'approved';
+      
       await pool.query(
-        `INSERT INTO profiles (unique_id, full_name, email, role, verification_status)
-         VALUES ($1, $2, $3, $4, 'new')`,
-        [unique_id, req.user.name, req.user.email, req.user.role]
+        `INSERT INTO profiles (unique_id, full_name, email, role, verification_status, country, phone)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (unique_id) DO NOTHING`,
+        [unique_id, req.user.name, req.user.email, role, initialStatus, req.user.country, req.user.phone]
       );
+      
+      // Fetch again to ensure we return the fresh row
       result = await pool.query(
-        `SELECT ${columns} FROM profiles WHERE unique_id = $1`,
+        `SELECT ${columns} 
+         FROM profiles p
+         RIGHT JOIN users u ON p.unique_id = u.unique_id
+         WHERE p.unique_id = $1`,
         [unique_id]
       );
     }
@@ -50,73 +75,65 @@ export const getProfile = async (req, res) => {
   }
 };
 
-// ------------------ 2. UPDATE PRIVATE PROFILE (TEXT) ------------------
+// ------------------ 2. UPDATE PRIVATE PROFILE ------------------
 export const updateProfile = async (req, res) => {
   try {
-    const { unique_id } = req.user;
+    const { unique_id, role } = req.user;
     const {
-      full_name,
-      username,
-      phone,
-      gender,
-      country,
-      city,
-      bio,
-      social_tiktok,
-      social_instagram,
-      social_facebook,
-      social_linkedin,
-      social_twitter,
-      agency_name,
-      license_number,
-      experience,
+      full_name, username, phone, gender, country, city, bio,
+      social_tiktok, social_instagram, social_facebook, social_linkedin, social_twitter,
+      // Agent/Owner Fields
+      agency_name, license_number, experience,
+      // Buyer Fields
+      preferred_location, budget_min, budget_max, property_type, move_in_date
     } = req.body;
 
     const errors = validateProfile({ full_name, username });
     if (Object.keys(errors).length) return res.status(400).json({ errors });
 
-    // ✅ LOGIC: Saving text moves status to 'pending'
+    // ✅ LOGIC: If Agent/Owner updates details, reset status to 'pending' for Admin review
+    const needsVerification = ['agent', 'owner'].includes(role);
+    
+    let statusUpdateSQL = "";
+    if (needsVerification) {
+        statusUpdateSQL = `, verification_status = 'pending', rejection_reason = NULL, ai_score = NULL`;
+    }
+
     const result = await pool.query(
       `UPDATE profiles SET
         full_name = $1, username = $2, phone = $3, gender = $4, country = $5, city = $6, bio = $7,
-        agency_name = $8, license_number = $9, experience = $10,
-        social_tiktok = $11, social_instagram = $12, social_facebook = $13, social_linkedin = $14, social_twitter = $15,
         
-        verification_status = 'pending', -- ✅ Submit for Review
-        rejection_reason = NULL,
-        ai_score = NULL,
-        ai_flags = NULL,
+        -- Agent/Owner Fields
+        agency_name = $8, license_number = $9, experience = $10,
+        
+        -- Socials
+        social_tiktok = $11, social_instagram = $12, social_facebook = $13, social_linkedin = $14, social_twitter = $15,
+
+        -- Buyer Fields
+        preferred_location = $17, budget_min = $18, budget_max = $19, property_type = $20, move_in_date = $21,
+        
         updated_at = NOW()
+        ${statusUpdateSQL} 
+
       WHERE unique_id = $16
       RETURNING *`,
       [
-        full_name,
-        username,
-        phone || null,
-        gender || null,
-        country || null,
-        city || null,
-        bio || null,
-        agency_name || null,
-        license_number || null,
-        experience || null,
-        social_tiktok || null,
-        social_instagram || null,
-        social_facebook || null,
-        social_linkedin || null,
-        social_twitter || null,
+        full_name, username, phone || null, gender || null, country || null, city || null, bio || null,
+        agency_name || null, license_number || null, experience || null,
+        social_tiktok || null, social_instagram || null, social_facebook || null, social_linkedin || null, social_twitter || null,
         unique_id,
+        preferred_location || null, budget_min || null, budget_max || null, property_type || null, move_in_date || null
       ]
     );
 
-    // Sync Users Table
-    await pool.query(`UPDATE users SET name = $1 WHERE unique_id = $2`, [
-      full_name,
-      unique_id,
-    ]);
+    // Sync Users Table Name & Phone (Important for the Fallback logic in getProfile)
+    await pool.query(
+        `UPDATE users SET name = $1, phone = $2, country = $3 WHERE unique_id = $4`, 
+        [full_name, phone, country, unique_id]
+    );
 
     res.json({
-      message: "Profile submitted for review.",
+      message: needsVerification ? "Profile submitted for review." : "Profile updated successfully.",
       profile: result.rows[0],
     });
   } catch (err) {
@@ -127,67 +144,7 @@ export const updateProfile = async (req, res) => {
   }
 };
 
-// ------------------ 3. UPDATE AVATAR (STREAM UPLOAD) ------------------
-export const updateAvatar = async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
-
-    const userId = req.user.unique_id;
-
-    // 1. Upload to Cloudinary via Stream (Buffer)
-    const result = await new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        {
-          folder: "keyvia_avatars",
-          public_id: `avatar_${userId}`,
-          overwrite: true,
-          transformation: [
-            { width: 500, height: 500, crop: "fill", gravity: "face" },
-          ],
-          resource_type: "image",
-        },
-        (error, result) => {
-          if (error) return reject(error);
-          resolve(result);
-        }
-      );
-      // ✅ Send the buffer (requires memoryStorage middleware)
-      stream.end(req.file.buffer);
-    });
-
-    const avatarUrl = result.secure_url;
-
-    // 2. ✅ Update PROFILES & Set 'pending'
-    await pool.query(
-      `UPDATE profiles 
-       SET 
-         avatar_url = $1, 
-         verification_status = 'pending', 
-         rejection_reason = NULL,
-         ai_score = NULL, 
-         updated_at = NOW() 
-       WHERE unique_id = $2
-       RETURNING avatar_url`,
-      [avatarUrl, userId]
-    );
-
-    // 3. Sync Users Table
-    await pool.query("UPDATE users SET avatar_url = $1 WHERE unique_id = $2", [
-      avatarUrl,
-      userId,
-    ]);
-
-    res.json({
-      message: "Avatar updated. Profile pending review.",
-      avatar_url: avatarUrl,
-    });
-  } catch (err) {
-    console.error("❌ Avatar Update Error:", err);
-    res.status(500).json({ message: "Avatar upload failed" });
-  }
-};
-
-// ------------------ 4. GET PUBLIC PROFILE ------------------
+// ------------------ 3. GET PUBLIC PROFILE ------------------
 export const getPublicProfile = async (req, res) => {
   try {
     const { username } = req.params;

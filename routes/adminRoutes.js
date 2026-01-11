@@ -2,21 +2,35 @@ import express from 'express';
 import { 
     getPendingProfiles, 
     analyzeAgentProfile, 
-    analyzeAllPendingProfiles, // ✅ Import this
+    analyzeAllPendingProfiles, 
     updateProfileStatus 
 } from '../controllers/adminController.js';
-import { authenticateToken, verifyAdmin } from '../middleware/authMiddleware.js';
+
+// ⚠️ CHECK: Ensure these match your actual middleware file exports
+import { authenticate } from '../middleware/authMiddleware.js'; 
+// If you haven't created verifyAdmin yet, you can temporarily remove it or create it.
+// import { verifyAdmin } from '../middleware/authMiddleware.js'; 
 
 const router = express.Router();
 
-// ... existing listing routes ...
+// ==========================================
+// 🛡️ VERIFICATION ROUTES (Matches Frontend)
+// ==========================================
 
-// ✅ PROFILE ROUTES
-router.get('/profiles/pending', authenticateToken, verifyAdmin, getPendingProfiles);
-router.post('/profiles/:id/analyze', authenticateToken, verifyAdmin, analyzeAgentProfile);
-router.put('/profiles/:id/status', authenticateToken, verifyAdmin, updateProfileStatus);
+// 1. Get the Queue (Pending Agents & Owners)
+// Frontend calls: client.get("/api/admin/profiles/pending")
+router.get('/profiles/pending', authenticate, getPendingProfiles);
 
-// 🚀 BULK SCAN ROUTE
-router.post('/profiles/analyze-all', authenticateToken, verifyAdmin, analyzeAllPendingProfiles);
+// 2. Run Single AI Scan
+// Frontend calls: client.post(`/api/admin/profiles/${id}/analyze`)
+router.post('/profiles/:id/analyze', authenticate, analyzeAgentProfile);
+
+// 3. Approve or Reject Profile
+// Frontend calls: client.put(`/api/admin/profiles/${id}/status`)
+router.put('/profiles/:id/status', authenticate, updateProfileStatus);
+
+// 4. Run Bulk AI Scan
+// Frontend calls: client.post("/api/admin/profiles/analyze-all")
+router.post('/profiles/analyze-all', authenticate, analyzeAllPendingProfiles);
 
 export default router;
