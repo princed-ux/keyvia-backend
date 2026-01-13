@@ -1,4 +1,3 @@
-// server.js
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -6,7 +5,7 @@ import dotenv from "dotenv";
 import http from "http";
 import path from "path";
 import { Server } from "socket.io";
-import { pool } from "./db.js";
+import { pool } from "./db.js"; // Ensure this path is correct
 
 // Routes
 import authRoutes from "./routes/auth.js";
@@ -15,8 +14,8 @@ import uploadsRoutes from "./routes/uploads.js";
 import messagesRoutes from "./routes/messages.js";
 import applicationsRoutes from "./routes/applications.js";
 import notificationsRoutes from "./routes/notifications.js";
-import profileRoutes from "./routes/profile.js";
-import avatarRoutes from "./routes/profileAvatar.js";
+import profileRoutes from "./routes/profile.js"; 
+// import avatarRoutes from "./routes/profileAvatar.js"; // DEPRECATED: Logic moved to profileRoutes
 import usersRoutes from "./routes/usersRoutes.js";
 import paymentsRoutes from "./routes/paymentsRoutes.js";
 import walletRoutes from "./routes/wallet.js";
@@ -26,6 +25,7 @@ import favoriteRoutes from "./routes/favorites.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import superAdminRoutes from "./routes/superAdminRoutes.js";
 
+// Load Env Vars
 dotenv.config();
 
 const app = express();
@@ -33,7 +33,7 @@ const PORT = process.env.PORT || 5000;
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 
 // =======================================================================
-// 1. INITIALIZE SERVER & SOCKET.IO (MUST BE AT THE TOP)
+// 1. INITIALIZE SERVER & SOCKET.IO
 // =======================================================================
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -55,22 +55,22 @@ app.use(
   })
 );
 app.use(cookieParser());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "10mb" })); // Increased limit for JSON payloads
 app.use(express.urlencoded({ extended: true }));
 
-// Serve uploaded files
+// Serve uploaded files (if using local storage fallback)
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 // =======================================================================
-// 3. ATTACH SOCKET.IO TO REQUEST (CRITICAL FIX)
+// 3. ATTACH SOCKET.IO
 // =======================================================================
 app.use((req, res, next) => {
-  req.io = io; // Now 'req.io' is available in all controllers
+  req.io = io; 
   next();
 });
 
 // =======================================================================
-// 4. REGISTER ROUTES (MUST BE AFTER MIDDLEWARE)
+// 4. REGISTER ROUTES
 // =======================================================================
 app.use("/api/auth", authRoutes);
 app.use("/api/listings", listingsRoutes);
@@ -78,8 +78,10 @@ app.use("/api/uploads", uploadsRoutes);
 app.use("/api/messages", messagesRoutes);
 app.use("/api/applications", applicationsRoutes);
 app.use("/api/notifications", notificationsRoutes);
-app.use("/api/profile", profileRoutes);
-app.use("/api/avatar", avatarRoutes);
+
+// ✅ Consolidated Profile Route (Includes /api/profile/avatar)
+app.use("/api/profile", profileRoutes); 
+
 app.use("/users", usersRoutes);
 app.use("/api/payments", paymentsRoutes);
 app.use("/api/wallet", walletRoutes);

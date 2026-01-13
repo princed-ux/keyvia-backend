@@ -550,7 +550,7 @@ export const verifyFirebasePhone = async (req, res) => {
 
 
 // ===================================================
-// 12. FINISH ONBOARDING (UPSERT PROFILE) - ✅ SECURED & TYPED
+// 12. FINISH ONBOARDING (UPSERT PROFILE) - ✅ SCHEMA CORRECTED
 // ===================================================
 export const finishOnboarding = async (req, res) => {
   const { 
@@ -569,11 +569,7 @@ export const finishOnboarding = async (req, res) => {
   const userName = req.user.name;
 
   try {
-    // -----------------------------------------------------
-    // 1. 🛡️ FRAUD PROTECTION: Check for Duplicates
-    // -----------------------------------------------------
-    // If the phone number exists on a DIFFERENT account, block it.
-    // If the license exists on a DIFFERENT account, block it.
+    // 1. Check for Duplicates
     const duplicateCheck = await pool.query(
         `SELECT unique_id, email FROM profiles 
          WHERE (phone = $1 AND unique_id != $3) 
@@ -588,23 +584,17 @@ export const finishOnboarding = async (req, res) => {
         });
     }
 
-    // -----------------------------------------------------
-    // 2. ID GENERATION
-    // -----------------------------------------------------
+    // 2. ID Generation
     let specialId;
     const checkUser = await pool.query("SELECT special_id FROM users WHERE unique_id = $1", [userId]);
     
     if (checkUser.rows[0] && checkUser.rows[0].special_id) {
         specialId = checkUser.rows[0].special_id;
     } else {
-        // Generate: AGT-XXXXX or OWN-XXXXX
         specialId = (role === 'agent' ? 'AGT-' : 'OWN-') + Math.random().toString(36).substr(2, 9).toUpperCase(); 
     }
 
-    // -----------------------------------------------------
-    // 3. UPDATE USERS TABLE (The Authority)
-    // -----------------------------------------------------
-    // ✅ Uses ::text casting to prevent "could not determine data type" errors
+    // 3. UPDATE USERS TABLE (This table HAS the booleans)
     await pool.query(
       `UPDATE users 
        SET 
@@ -619,8 +609,8 @@ export const finishOnboarding = async (req, res) => {
             WHEN $2::text = 'agent' AND $4::text IS NOT NULL AND $4::text != '' THEN 'licensed'
             ELSE 'none'
          END,
-         is_agent = ($2::text = 'agent'),
-         is_owner = ($2::text = 'owner')
+         is_agent = ($2::text = 'agent'), -- ✅ Users table has this
+         is_owner = ($2::text = 'owner')  -- ✅ Users table has this
        WHERE unique_id = $1`,
       [
           userId, 
@@ -633,16 +623,17 @@ export const finishOnboarding = async (req, res) => {
       ]
     );
     
-    // -----------------------------------------------------
-    // 4. UPDATE PROFILES TABLE (The Public View)
-    // -----------------------------------------------------
+    // 4. UPDATE PROFILES TABLE (This table ONLY has the 'role' string)
     await pool.query(
       `INSERT INTO profiles (
           unique_id, email, full_name, country, phone, 
           license_number, experience, agency_name, role, special_id, 
           verification_status
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'new') 
+       VALUES (
+          $1, $2, $3, $4, $5, 
+          $6, $7, $8, $9, $10, 'new'
+       ) 
        ON CONFLICT (unique_id) 
        DO UPDATE SET 
          country = EXCLUDED.country,
@@ -653,7 +644,7 @@ export const finishOnboarding = async (req, res) => {
          role = EXCLUDED.role,              
          special_id = EXCLUDED.special_id,   
          full_name = EXCLUDED.full_name,
-         verification_status = 'new';`, // Status resets to 'new' so Admin verifies the new details
+         verification_status = 'new';`, 
       [
         userId, 
         userEmail, 
@@ -668,9 +659,6 @@ export const finishOnboarding = async (req, res) => {
       ]
     );
 
-    // -----------------------------------------------------
-    // 5. SUCCESS RESPONSE
-    // -----------------------------------------------------
     res.json({ 
         success: true, 
         message: "Onboarding complete.", 

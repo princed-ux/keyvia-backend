@@ -6,7 +6,7 @@ import { analyzeProfile } from "../services/aiProfileService.js";
 // =========================================================
 export const getPendingProfiles = async (req, res) => {
   try {
-    // Fetches profiles waiting for verification (Agent Licenses or Owner IDs)
+    // ✅ FIX: Removed 'new'. Only fetch profiles explicitly waiting for review ('pending').
     const result = await pool.query(`
       SELECT 
         p.unique_id, 
@@ -18,7 +18,6 @@ export const getPendingProfiles = async (req, res) => {
         p.city, 
         p.phone, 
         p.role, 
-        -- ✅ Critical Fields for Verification
         p.license_number, 
         p.agency_name, 
         p.experience,
@@ -26,10 +25,10 @@ export const getPendingProfiles = async (req, res) => {
         p.bio, 
         p.created_at, 
         p.verification_status,
-        -- ✅ Fallback for review count if table doesn't exist yet
+        -- Fallback for review count if table doesn't exist yet
         0 as review_count
       FROM profiles p
-      WHERE p.verification_status IN ('pending', 'new') 
+      WHERE p.verification_status = 'pending' 
       ORDER BY p.created_at DESC
     `);
     res.json(result.rows);
@@ -67,8 +66,8 @@ export const analyzeAgentProfile = async (req, res) => {
 // =========================================================
 export const analyzeAllPendingProfiles = async (req, res) => {
   try {
-    // 1. Get all pending profiles
-    const pendingRes = await pool.query("SELECT * FROM profiles WHERE verification_status IN ('pending', 'new')");
+    // ✅ FIX: Only scan 'pending'. Do not scan empty/new profiles to save AI costs.
+    const pendingRes = await pool.query("SELECT * FROM profiles WHERE verification_status = 'pending'");
     const profiles = pendingRes.rows;
 
     let approved = 0;
@@ -97,7 +96,7 @@ export const analyzeAllPendingProfiles = async (req, res) => {
 
         // 3. If Status Changed, Update DB
         if (newStatus !== 'pending') {
-            // We reuse the update logic (simulated here for bulk speed)
+            // Update Profile Table
             await pool.query(
                 `UPDATE profiles SET 
                  verification_status=$1, 
