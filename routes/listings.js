@@ -1,6 +1,6 @@
 import express from "express";
 import {
-  getListings,           // 👈 This controller now handles the logic you had inline!
+  getListings,
   getListingByProductId,
   getAgentListings,
   getAllListingsAdmin,
@@ -14,25 +14,26 @@ import {
   batchAnalyzeListings
 } from "../controllers/listingsController.js";
 
-import { authenticateToken, verifyAdmin } from "../middleware/authMiddleware.js";
+// ✅ IMPORT optionalAuth HERE
+import { authenticateToken, optionalAuth, verifyAdmin } from "../middleware/authMiddleware.js";
 import { upload } from "../middleware/upload.js";
 
 const router = express.Router();
 
 /* ============================================================
-   1. PUBLIC & STATIC ROUTES (Defined FIRST to avoid conflicts)
+   1. PUBLIC & STATIC ROUTES
 ============================================================ */
 
 // ✅ 1. Homepage / Search Feed
-// This replaces the long manual SQL code you had. 
-// The 'getListings' controller now handles filtering, search, and agent_role.
-// 'softAuth' checks if a user is logged in (for favorites) but lets guests pass.
-router.get("/public", authenticateToken, getListings); 
+// CHANGED: authenticateToken -> optionalAuth
+// This allows guests to view listings without a 401 error.
+// If a token IS present, it attaches the user so 'is_favorited' works.
+router.get("/public", optionalAuth, getListings); 
 
-// ✅ 2. Agent Portfolio (Protected)
+// ✅ 2. Agent Portfolio (Protected - Agent viewing their own)
 router.get("/agent", authenticateToken, getAgentListings);
 
-// ✅ 3. Public Agent Profile (e.g. /agent/@username)
+// ✅ 3. Public Agent Profile (Publicly accessible)
 router.get("/public/agent/:unique_id", getPublicAgentProfile);
 
 // ✅ 4. Admin Dashboard
@@ -59,8 +60,9 @@ router.post(
 );
 
 // ✅ Get Single Listing (Details Page)
-// Uses softAuth so we know if the viewer is the owner
-router.get("/:product_id", authenticateToken, getListingByProductId);
+// CHANGED: authenticateToken -> optionalAuth
+// Guests should be able to see property details too!
+router.get("/:product_id", optionalAuth, getListingByProductId);
 
 // ✅ Update Listing
 router.put(

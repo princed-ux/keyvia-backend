@@ -1,50 +1,79 @@
 import { pool } from "../db.js";
 
-// import pool from "../config/db.js";
-
 export const getNotifications = async (req, res) => {
   try {
-    const { unique_id } = req.user;
-
+    const userId = req.user.unique_id;
+    
+    // ✅ Ensure this query uses 'receiver_id' matching your SQL table
     const result = await pool.query(
-      `SELECT * FROM notifications 
-       WHERE unique_id = $1 
-       ORDER BY created_at DESC`,
-      [unique_id]
+      `SELECT * FROM notifications WHERE receiver_id = $1 ORDER BY created_at DESC LIMIT 50`, 
+      [userId]
     );
 
     res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to fetch notifications", error });
+  } catch (err) {
+    console.error("Error fetching notifications:", err.message);
+    res.status(500).json({ message: "Server error" });
   }
 };
 
-export const markNotificationRead = async (req, res) => {
+// ... keep your getGlobalCounts, markAsRead, etc.
+export const getGlobalCounts = async (req, res) => {
   try {
-    const notificationId = req.params.id;
-
-    await pool.query(
-      `UPDATE notifications SET is_read = true WHERE id = $1`,
-      [notificationId]
+    const userId = req.user.unique_id;
+    const notifCount = await pool.query(
+      `SELECT COUNT(*)::int FROM notifications WHERE receiver_id = $1 AND is_read = FALSE`,
+      [userId]
+    );
+    const appCount = await pool.query(
+      `SELECT COUNT(*)::int FROM notifications WHERE receiver_id = $1 AND is_read = FALSE AND type LIKE '%application%'`,
+      [userId]
+    );
+    const msgCount = await pool.query(
+      `SELECT COUNT(*)::int FROM messages m
+       JOIN conversations c ON m.conversation_id = c.conversation_id
+       WHERE (c.user1_id = $1 OR c.user2_id = $1) AND m.sender_id != $1 AND m.seen = FALSE`,
+      [userId]
     );
 
-    res.json({ message: "Notification marked as read" });
-  } catch (error) {
-    res.status(500).json({ message: "Failed to update notification", error });
+    res.json({
+      notifications: notifCount.rows[0].count,
+      applications: appCount.rows[0].count,
+      messages: msgCount.rows[0].count
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
   }
 };
 
-export const markAllNotificationsRead = async (req, res) => {
+export const markAsRead = async (req, res) => {
   try {
-    const { unique_id } = req.user;
+    const userId = req.user.unique_id;
+    await pool.query(`UPDATE notifications SET is_read = TRUE WHERE receiver_id = $1`, [userId]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+};
 
-    await pool.query(
-      `UPDATE notifications SET is_read = true WHERE unique_id = $1`,
-      [unique_id]
-    );
+export const deleteNotification = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.unique_id;
+    await pool.query(`DELETE FROM notifications WHERE id = $1 AND receiver_id = $2`, [id, userId]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+};
 
-    res.json({ message: "All notifications marked as read" });
-  } catch (error) {
-    res.status(500).json({ message: "Failed to update notifications", error });
+export const clearAllNotifications = async (req, res) => {
+  try {
+    const userId = req.user.unique_id;
+    await pool.query(`DELETE FROM notifications WHERE receiver_id = $1`, [userId]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
   }
 };

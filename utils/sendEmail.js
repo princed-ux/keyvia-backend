@@ -10,38 +10,42 @@ const {
 } = process.env;
 
 /* ======================================================
-   📨 SMTP TRANSPORTER (Robust Configuration)
+   📨 SMTP TRANSPORTER
 ====================================================== */
-// ✅ FIX: Use specific Gmail settings to prevent timeouts
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
-  port: 587, // Use 587 for TLS
-  secure: false, // Must be false for port 587
+  port: 587, 
+  secure: false, 
   auth: {
     user: EMAIL_USER,
-    pass: EMAIL_PASS, // Make sure this is an App Password!
+    pass: EMAIL_PASS, 
   },
+  family: 4, // Keep this to prevent timeouts
+  pool: true, 
+  maxConnections: 2,
+  
+  // ❌ Disable Debug Logging
+  logger: false, 
+  debug: false, 
+
   tls: {
-    ciphers: "SSLv3",
-    rejectUnauthorized: false, // Helps avoid certificate errors in dev
-  },
-  connectionTimeout: 10000, // Wait 10 seconds
-  greetingTimeout: 10000,   // Wait 10 seconds for greeting
-  socketTimeout: 10000,     // Wait 10 seconds for socket
+    rejectUnauthorized: false, 
+  }
 });
 
-// Verify SMTP on startup
+// Verify SMTP on startup (Quiet Mode)
 transporter.verify((error) => {
   if (error) {
     console.error("❌ SMTP connection failed:", error.message);
   } else {
-    console.log("✅ SMTP server ready to send emails");
+    console.log("✅ SMTP server ready");
   }
 });
 
 /* ======================================================
    🎨 PROFESSIONAL EMAIL TEMPLATE
 ====================================================== */
+// ... (The rest of your file remains exactly the same) ...
 const LOGO_URL = "https://res.cloudinary.com/dcwpytcpc/image/upload/v1767102929/mainLogo_zfcxjf.png"; 
 const BRAND_COLOR = "#09707D"; 
 
@@ -102,7 +106,6 @@ const sendSafeMail = async ({ to, subject, html }) => {
     console.log(`📨 Email sent → ${to} | ${subject}`);
   } catch (err) {
     console.error("❌ Email send failed:", err.message);
-    throw err;
   }
 };
 
@@ -151,7 +154,7 @@ export const sendPasswordResetEmail = async (email, name, token) => {
   if (!token && name) { token = name; }
   const resetLink = `${CLIENT_URL}/reset-password/${token}`;
   const html = emailWrapper(
-    "Reset Password Request",
+    "Reset Password Request",   
     `
       <p class="text">We received a request to reset the password for your Keyvia account.</p>
       <a href="${resetLink}" class="btn">Reset Password</a>

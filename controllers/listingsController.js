@@ -3,6 +3,7 @@ import cloudinary from "../utils/cloudinary.js";
 import crypto from "crypto";
 import axios from "axios";
 import { performFullAnalysis } from "../services/analysisService.js";
+import { COUNTRY_ISO_MAP } from "../utils/countryMap.js";
 
 /* ----------------- helpers ----------------- */
 function generateProductId() {
@@ -164,9 +165,19 @@ const runBackgroundProcessing = async (listingId, photoFiles, addressData, video
 
     console.log(`✅ Listing ${listingId} processing complete & ready for review.`);
 
+
   } catch (error) {
     console.error(`❌ Background processing failed for ${listingId}:`, error);
-    // Optionally flag as error in DB
+    
+    // ✅ CRITICAL FIX: Mark listing as failed so it doesn't stay stuck forever
+    try {
+        await pool.query(
+            `UPDATE listings SET status = 'draft', admin_notes = $1 WHERE product_id = $2`,
+            [`System Error: Upload failed. Please try again. (${error.message})`, listingId]
+        );
+    } catch (dbErr) {
+        console.error("Failed to update listing status to error:", dbErr);
+    }
   }
 };
 
@@ -627,19 +638,33 @@ export const deleteListing = async (req, res) => {
 };
 
 
-
 /* -------------------------------------------------------
    1. GET LISTINGS (Public - /buy, /rent, Homepage)
-   UPDATED: Now returns 'agent_role' (owner/agent)
+   UPDATED: With DEEP LOGGING for Debugging
 ------------------------------------------------------- */
 export const getListings = async (req, res) => {
   try {
-    const { category, search, minLat, maxLat, minLng, maxLng, type, minPrice, maxPrice, city } = req.query;
+    console.log("\n========================================");
+    console.log("🚀 GET /listings/public HIT");
+    console.log("========================================");
+
+    const { 
+      category, search, minLat, maxLat, minLng, maxLng, 
+      type, minPrice, maxPrice, city, polygon 
+    } = req.query;
+
+    // Log Incoming Params
+    console.log("📥 Query Params:", { 
+        category, type, city, 
+        hasPolygon: !!polygon, 
+        hasViewport: (!!minLat && !!maxLat) 
+    });
 
     let currentUserId = null;
-    // ... (Keep JWT auth logic if you have it) ...
+    if (req.user && req.user.unique_id) {
+        currentUserId = req.user.unique_id;
+    }
 
-    // ✅ ADDED: p.role as agent_role
     let queryText = `
       SELECT 
         l.*, 
@@ -647,9 +672,11 @@ export const getListings = async (req, res) => {
         p.avatar_url as agent_avatar, 
         p.agency_name,
         p.username as agent_username,
-        p.role as agent_role,  -- 👈 NEW: Fetches 'agent' or 'owner'
+        p.role as agent_role, 
         p.phone as agent_phone,
-        CASE WHEN f.product_id IS NOT NULL THEN true ELSE false END as is_favorited
+        CASE WHEN f.product_id IS NOT NULL THEN true ELSE false END as is_favorited,
+        -- DEBUG: Return the location as text to verify it exists
+        ST_AsText(l.location) as debug_location
       FROM listings l
       JOIN profiles p ON l.agent_unique_id = p.unique_id
       LEFT JOIN favorites f ON l.product_id = f.product_id AND f.user_id = $1
@@ -660,14 +687,41 @@ export const getListings = async (req, res) => {
     const queryParams = [currentUserId];
     let paramCounter = 2; 
 
-    // --- FILTERS (Combined Logic) ---
+    // --- 1. POLYGON SEARCH ---
+    if (polygon) {
+        try {
+            console.log("🔹 Parsing Polygon JSON...");
+            const geoJson = JSON.parse(polygon);
+            
+            // Log the coordinates to ensure they look right (Lat/Lng vs Lng/Lat)
+            // GeoJSON expects [Longitude, Latitude]
+            if (geoJson.coordinates && geoJson.coordinates.length > 0) {
+                console.log("📍 First Point in Polygon:", geoJson.coordinates[0][0]);
+            }
+
+            queryText += ` 
+                AND l.location IS NOT NULL 
+                AND ST_Intersects(
+                    ST_SetSRID(ST_GeomFromGeoJSON($${paramCounter}), 4326), 
+                    l.location
+                )`;
+            
+            queryParams.push(JSON.stringify(geoJson));
+            paramCounter++;
+            console.log("✅ Polygon Filter Added to SQL");
+
+        } catch (e) {
+            console.error("❌ Invalid Polygon JSON received:", e.message);
+        }
+    }
+
+    // --- 2. STANDARD FILTERS ---
     if (category && category !== 'undefined') {
       queryText += ` AND (category ILIKE $${paramCounter} OR listing_type ILIKE $${paramCounter})`;
       queryParams.push(category);
       paramCounter++;
     }
 
-    // Support for ?type=rent or ?type=sale specific filter
     if (type) {
       queryText += ` AND l.listing_type = $${paramCounter}`;
       queryParams.push(type.toLowerCase());
@@ -704,7 +758,9 @@ export const getListings = async (req, res) => {
       paramCounter++;
     }
 
-    if (minLat && maxLat && minLng && maxLng && !isNaN(Number(minLat))) {
+    // Viewport Search (Fallback)
+    if (!polygon && minLat && maxLat && minLng && maxLng && !isNaN(Number(minLat))) {
+      console.log("🔹 Using Viewport (Bounds) Search");
       queryText += ` 
         AND l.latitude::numeric >= $${paramCounter} 
         AND l.latitude::numeric <= $${paramCounter + 1}
@@ -717,14 +773,25 @@ export const getListings = async (req, res) => {
 
     queryText += " ORDER BY l.activated_at DESC NULLS LAST LIMIT 500";
 
+    // --- 3. EXECUTE & LOG ---
+    console.log("📝 Executing SQL:", queryText);
+    console.log("📦 With Params:", JSON.stringify(queryParams));
+
     const result = await pool.query(queryText, queryParams);
 
+    console.log(`✅ Database returned ${result.rows.length} rows`);
+    if (result.rows.length > 0) {
+        console.log("🔎 First Match Location:", result.rows[0].debug_location);
+    } else {
+        console.log("⚠️ No matches found. Check if your Polygon covers the Listing Location.");
+    }
+
+    // --- 4. FORMAT RESPONSE ---
     const listings = result.rows.map(l => {
       let photos = [], features = [];
       try { photos = typeof l.photos === 'string' ? JSON.parse(l.photos) : (l.photos || []); } catch (e) {}
       try { features = typeof l.features === 'string' ? JSON.parse(l.features) : (l.features || []); } catch (e) {}
 
-      // Normalize photos
       photos = photos.map(p => ({ url: p.url || p, type: 'image' }));
 
       return {
@@ -733,24 +800,23 @@ export const getListings = async (req, res) => {
         features,
         latitude: l.latitude ? parseFloat(l.latitude) : null,
         longitude: l.longitude ? parseFloat(l.longitude) : null,
-        // ✅ Structure Agent Info
         agent: {
             name: l.agent_name,
             avatar: l.agent_avatar,
             username: l.agent_username,
-            role: l.agent_role, // 'agent' or 'owner'
+            role: l.agent_role, 
             agency: l.agency_name
         }
       };
     });
 
     res.json(listings);
+
   } catch (err) {
-    console.error("❌ Error fetching public listings:", err);
+    console.error("❌ CRITICAL ERROR in getListings:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
-
 
 
 /* -------------------------------------------------------
@@ -1034,9 +1100,7 @@ export const getAllListingsAdmin = async (req, res) => {
 
 
 /* -------------------------------------------------------
-   GET PUBLIC AGENT PROFILE
-   ✅ FIXED: Changed 'status' to 'verification_status'
-   ✅ FIXED: Removed 'country_code' (Auto-generated instead)
+   GET PUBLIC PROFILE (Agent, Landlord, or Buyer)
 ------------------------------------------------------- */
 export const getPublicAgentProfile = async (req, res) => {
   try {
@@ -1044,6 +1108,7 @@ export const getPublicAgentProfile = async (req, res) => {
     let queryCondition = "";
     let queryValue = unique_id;
 
+    // Determine if searching by UUID or Username
     const isUUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(unique_id);
 
     if (isUUID) {
@@ -1053,55 +1118,66 @@ export const getPublicAgentProfile = async (req, res) => {
         queryCondition = "(username ILIKE $1 OR full_name ILIKE $1)";
     }
 
-    // ✅ FIXED QUERY: 
-    // 1. Removed 'country_code' (prevents error)
-    // 2. Changed 'status' -> 'verification_status AS status' (Fixes your current error)
+    // 1. Fetch Profile
     const profileQ = await pool.query(
       `SELECT unique_id, full_name, username, avatar_url, bio, 
               agency_name, experience, country, city, 
               email, phone, social_instagram, social_twitter, social_linkedin,
               role, 
-              verification_status AS status, -- 👈 ALIASING THIS FOR FRONTEND COMPATIBILITY
+              verification_status AS status, 
               created_at
        FROM profiles 
        WHERE ${queryCondition}`,
       [queryValue]
     );
 
-    if (profileQ.rows.length === 0) return res.status(404).json({ message: "Profile not found" });
+    if (profileQ.rows.length === 0) {
+        return res.status(404).json({ message: "Profile not found" });
+    }
     
     const agent = profileQ.rows[0];
 
-    // ✅ MANUALLY GENERATE COUNTRY CODE (for Flag Emoji)
-    const countryMap = {
-        "Nigeria": "NG",
-        "United States": "US",
-        "United Kingdom": "GB",
-        "Canada": "CA",
-        "Ghana": "GH",
-        "South Africa": "ZA"
-    };
-    agent.country_code = countryMap[agent.country] || "NG"; 
+    // ✅ LOGIC FIX: BUYERS ARE ALWAYS "LIVE"
+    if (agent.role === 'buyer') {
+        agent.status = 'verified'; 
+    }
 
-    // Fetch Listings
-    const listingsQ = await pool.query(
-      `SELECT * FROM listings 
-       WHERE agent_unique_id = $1 AND status = 'approved' AND is_active = true
-       ORDER BY created_at DESC`,
-      [agent.unique_id]
-    );
+    // ✅ LOGIC FIX: ROBUST COUNTRY CODE MAPPING
+    // Uses the imported map. If exact match found, use it. 
+    // If not, fallback to NULL (Frontend will show Globe 🌍)
+    agent.country_code = COUNTRY_ISO_MAP[agent.country] || null;
 
-    // Normalize photos
-    const listings = listingsQ.rows.map(l => {
-      let photos = [];
-      try { photos = typeof l.photos === "string" ? JSON.parse(l.photos) : l.photos || []; } catch {}
-      return { ...l, photos: photos.map(p => ({ url: p.url || p, type: 'image' })) };
+    // 3. Fetch Listings (ONLY if NOT a buyer)
+    let listings = [];
+    
+    if (agent.role !== 'buyer') {
+        const listingsQ = await pool.query(
+          `SELECT * FROM listings 
+           WHERE agent_unique_id = $1 AND status = 'approved' AND is_active = true
+           ORDER BY created_at DESC`,
+          [agent.unique_id]
+        );
+
+        // Normalize photos
+        listings = listingsQ.rows.map(l => {
+          let photos = [];
+          try { photos = typeof l.photos === "string" ? JSON.parse(l.photos) : l.photos || []; } catch {}
+          return { ...l, photos: photos.map(p => ({ url: p.url || p, type: 'image' })) };
+        });
+    }
+
+    // 4. Send Response
+    res.json({ 
+        agent, 
+        listings,
+        // Suggest a cover image for Buyers since they don't have listings
+        default_cover: agent.role === 'buyer' 
+            ? "https://images.unsplash.com/photo-1560518883-ce09059eeffa?q=80&w=1973&auto=format&fit=crop" 
+            : null
     });
 
-    res.json({ agent, listings });
-
   } catch (err) {
-    console.error("[GetPublicAgent] Error:", err);
+    console.error("[GetPublicProfile] Error:", err);
     res.status(500).json({ message: "Server Error" });
   }
 };

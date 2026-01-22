@@ -4,7 +4,7 @@ import { authenticateToken } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// Middleware: Require login (and preferably role check for 'owner')
+// Middleware: Require login
 router.use(authenticateToken); 
 
 // ==========================================
@@ -18,14 +18,14 @@ router.get("/stats", async (req, res) => {
       // 1. Total Properties
       pool.query(`SELECT COUNT(*)::int as count FROM listings WHERE agent_unique_id = $1`, [ownerId]),
       
-      // 2. Active Tenants (Assuming you have a 'tenants' or 'leases' table, or using listings status)
+      // 2. Active Tenants (Assuming 'Occupied' status tracks this)
       pool.query(`SELECT COUNT(*)::int as count FROM listings WHERE agent_unique_id = $1 AND status = 'Occupied'`, [ownerId]),
       
-      // 3. Total Revenue (From payments table where purpose='rent')
+      // 3. Total Revenue (Removed 'purpose' filter to fix crash)
       pool.query(
         `SELECT COALESCE(SUM(amount), 0)::float as total 
          FROM payments 
-         WHERE agent_unique_id = $1 AND status = 'successful' AND purpose = 'rent_payment'`,
+         WHERE agent_unique_id = $1 AND status = 'successful'`,
         [ownerId]
       )
     ]);
@@ -34,7 +34,7 @@ router.get("/stats", async (req, res) => {
       properties: propRes.rows[0].count || 0,
       tenants: tenantRes.rows[0].count || 0,
       revenue: revRes.rows[0].total || 0,
-      maintenance: 0 // Placeholder until maintenance table exists
+      maintenance: 0 
     });
   } catch (err) {
     console.error("Owner Stats Error:", err.message);
@@ -51,19 +51,19 @@ router.get("/charts/revenue", async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT 
-         EXTRACT(MONTH FROM created_at)::int as month_num,
-         SUM(amount) as total
-       FROM payments
-       WHERE agent_unique_id = $1 
-         AND status = 'successful'
-         AND purpose = 'rent_payment'
-         AND created_at >= NOW() - INTERVAL '6 months'
-       GROUP BY month_num
-       ORDER BY month_num ASC`,
+          EXTRACT(MONTH FROM created_at)::int as month_num,
+          SUM(amount) as total
+        FROM payments
+        WHERE agent_unique_id = $1 
+          AND status = 'successful'
+          -- Removed 'purpose' filter here too
+          AND created_at >= NOW() - INTERVAL '6 months'
+        GROUP BY month_num
+        ORDER BY month_num ASC`,
       [ownerId]
     );
 
-    // Map to array (simplified)
+    // Ensure we return data for the frontend chart
     const data = result.rows.map(r => Number(r.total));
     res.json({ data: data.length ? data : [0,0,0,0,0,0] });
   } catch (err) {
@@ -73,7 +73,7 @@ router.get("/charts/revenue", async (req, res) => {
 });
 
 // ==========================================
-// 3. OCCUPANCY CHART
+// 3. OCCUPANCY CHART (Unchanged)
 // ==========================================
 router.get("/charts/occupancy", async (req, res) => {
   const ownerId = req.user.unique_id;
@@ -88,6 +88,7 @@ router.get("/charts/occupancy", async (req, res) => {
     );
 
     const occupied = result.rows.find(r => r.status === 'Occupied')?.count || 0;
+    // Group 'Vacant' and 'Active' together as vacancies
     const vacant = result.rows.find(r => r.status === 'Vacant' || r.status === 'Active')?.count || 0;
 
     res.json({
@@ -101,7 +102,7 @@ router.get("/charts/occupancy", async (req, res) => {
 });
 
 // ==========================================
-// 4. RECENT PROPERTIES
+// 4. RECENT PROPERTIES (Unchanged)
 // ==========================================
 router.get("/properties", async (req, res) => {
   const ownerId = req.user.unique_id;
@@ -131,18 +132,18 @@ router.get("/activity", async (req, res) => {
   const ownerId = req.user.unique_id;
   
   try {
-    // Combine payments and potentially maintenance requests
+    // Removed 'purpose' filter
     const result = await pool.query(
       `SELECT 
-         transaction_id as id, 
-         'Payment' as type, 
-         'Rent Received' as message, 
-         amount, 
-         created_at as date 
-       FROM payments 
-       WHERE agent_unique_id = $1 AND purpose = 'rent_payment'
-       ORDER BY created_at DESC 
-       LIMIT 5`,
+          id as transaction_id, 
+          'Payment' as type, 
+          'Rent Received' as message, 
+          amount, 
+          created_at as date 
+        FROM payments 
+        WHERE agent_unique_id = $1 
+        ORDER BY created_at DESC 
+        LIMIT 5`,
       [ownerId]
     );
 
